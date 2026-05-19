@@ -5,6 +5,8 @@
 # Remove the custom package_loader function and install.packages() calls
 
 # Simply load required packages - shinyapps.io will automatically detect and install them
+## commiting out libraries that are not used 
+## remove here, scales, and glue as there were not called oftem and easily replaced. 
 suppressMessages({
   #library(furrr)
   library(ross.wq.tools)
@@ -12,38 +14,34 @@ suppressMessages({
   library(zoo)
   library(padr)
   # Data cleaning and utilities
-  library(janitor)
-  library(broom)
-  library(here)
-  library(glue)
+  # library(janitor)
+  # library(broom)
   # Stats/modeling
   library(stats)
-  library(RcppRoll)
-  library(trend)
-  library(scales)
+  # library(RcppRoll)
+  # library(trend)
   library(xgboost)
   # Spatial packages
   library(sf)
   library(leaflet)
   # Vis
-  library(ggpubr)
-  library(ggthemes)
-  library(scales)
+  # library(ggpubr)
+  # library(ggthemes)
   library(plotly)
-  library(ggpmisc)
+  # library(ggpmisc)
   # Web scraping/data retrieval
   library(rvest)
-  library(httr)
+  # library(httr)
   library(httr2)
   library(cdssr)
   library(yaml)
   # Development tools
-  library(devtools)
+  library(devtools) # this might be needed as ross.wq and cddsr are not on cran 
   # Shiny
   library(shiny)
-  library(shinymanager)
+  library(shinymanager) # maybe? 
   library(shinycssloaders)
-  library(shinyTime)
+  # library(shinyTime)
   library(bslib)
   library(shinyWidgets)
   library(shinydashboard)
@@ -59,6 +57,12 @@ suppressMessages({
 
 #### Set up ####
 
+# GitHub Data URLs
+data_repo_url <- "https://github.com/rossyndicate/uclp_dashboard/raw/main/data/"
+snapshot_url <- paste0(data_repo_url, "data_backup.parquet")
+intake_forecast_url <- paste0(data_repo_url, "toc_forecast_intake_backup.parquet")
+distributed_forecast_url <- paste0(data_repo_url, "toc_forecast_distributed_backup.parquet")
+
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
 #negate %in% call for easier filtering
@@ -68,6 +72,15 @@ options(shiny.maxRequestSize = 10000 * 1024^2)
 site_table <- tibble(site_code = c("sfm", "chd", "pfal", "pbd", "pbr_fc", "pman_fc"),
                      site_name = c("South Fork CLP", "Chambers Lake Outflow", "CLP at Poudre Falls", "Canyon Mouth", "CLP at Indian Meadows", "CLP at Manners Bridge"),
                      color = c("#002EA3", "#E70870", "#256BF5", "#1E4D2B", "#56104E", "#FFCA3A"))
+
+# Site Metadata
+sonde_locations <- read_csv("data/sonde_location_metadata.csv", show_col_types = FALSE) %>%
+  separate(col = "lat_long", into = c("lat", "lon"), sep = ",", convert = TRUE) %>%
+  mutate(
+    site = tolower(Site),
+    site = ifelse(site %in% c("pman", "pbr"), paste0(site, "_fc"), site)
+  ) %>%
+  select(site, Site_Name = Site, lat, lon, watershed)
 
 #CDWR sites we are interested in
 cdwr_lookup_table <- tibble(
@@ -85,8 +98,13 @@ cdwr_lookup_table <- tibble(
 #Just Isolate the site abbrevs
 cdwr_upper_clp_sites <- cdwr_lookup_table%>%pull(site_abbrev)
 
-
-cdwr_api_key <- read_yaml("creds/CDWRCreds.yml")$api_key
+# CDWR API Key handling with fallback
+cdwr_api_key <- tryCatch({
+  read_yaml("creds/CDWRCreds.yml")$api_key
+}, error = function(e) {
+  warning("CDWR API key not found in creds/CDWRCreds.yml")
+  NULL
+})
 
 water_chem <- read_parquet("data/chem/ROSS_FC_water_chemistry_20251114.parquet")
 
@@ -104,4 +122,9 @@ toc_model_bounds <- water_chem%>%
             TOC_upper = max(TOC, na.rm = T))
 
 toc_forecast_sites <- read_csv("data/toc_forecast_location_metadata.csv", show_col_types = F)%>%filter(model_version == "Distributed")
+
+# Load TOC real-time model ensemble
+toc_realtime_model <- map(1:3, ~xgb.load(
+  modelfile = paste0("data/models/ross_only_toc_xgboost_model_fold", .x, "_20260224.ubj")
+))
 

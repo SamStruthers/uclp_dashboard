@@ -2,292 +2,312 @@
 
 
 server <- function(input, output, session) {
+  # Store the main session in userData for module access
+  session$userData$parent_session <- session
+  
   # Call secure_server to check credentials
-  res_auth <- secure_server(
-    check_credentials = check_credentials(
-      db = "setup/credentials.sqlite",
-      passphrase = Sys.getenv("DB_PASSWORD")
-    )
-  )
-
-  # Reactive values for storing data
-  values <- reactiveValues(
-    all_data = NULL,
-    site_locations = NULL,
-    flow_sites = NULL,
-    last_refresh = Sys.time()
-  )
-
-  output$dynamic_load_button <- renderUI({
-    div(
-      actionBttn("load_data",
-                 "Load Data",
-                 color = "default",
-                 style = "fill",
-                 size = "lg"),
-      switchInput("apply_qaqc_filter",
-                  "Apply Data QAQC Filters",
-                  value = TRUE,
-                  inline = TRUE)
-    )
-  })
+  # res_auth <- secure_server(
+  #   check_credentials = check_credentials(
+  #     db = "setup/credentials.sqlite",
+  #     passphrase = Sys.getenv("DB_PASSWORD")
+  #   )
+  # )
 
   #setup loaded data
   loaded_data <- reactiveVal(NULL)
 
-  #TODO: This is done at load up, should it be moved to global?
+  # Initialize home module
+  home_state <- home_server("home", loaded_data)
 
-  #### Pre loading API/Cached Data ####
+  # Sidebar Gating Logic
   observe({
-    withProgress(message = "Retrieving CLP WQ Data...", {
+    # List of tabs to disable until full sync is complete
+    tabs_to_gate <- c("sensor_data", "flow_data", "toc_forecasts")
+    
+    if (home_state$full_sync_done()) {
+      for (tab in tabs_to_gate) {
+        shinyjs::removeCssClass(selector = paste0("a[data-value='", tab, "']"), class = "disabled-menu")
+        # Remove the tooltip from the parent list item
+        shinyjs::runjs(sprintf("$('a[data-value=\"%s\"]').parent('li').removeAttr('title');", tab))
+      }
+    } else {
+      for (tab in tabs_to_gate) {
+        shinyjs::addCssClass(selector = paste0("a[data-value='", tab, "']"), class = "disabled-menu")
+        # Add a tooltip to the parent list item (since pointer-events: none on the <a> disables its own tooltips)
+        shinyjs::runjs(sprintf("$('a[data-value=\"%s\"]').parent('li').attr('title', 'Select the Initialize Data button to proceed to the detailed data pages');", tab))
+      }
+    }
+  })
 
-      # read inputs once at startup
-      date_range <- isolate(input$date_range) # This is where the user picks the start DT
-      sites_select <- isolate(input$sites_select)
-      parameters_select <- isolate(input$parameters_select)
+  # Reactive values for storing data
+  values <- reactiveValues(
+    all_data = NULL,
+    flow_sites = NULL,
+    clp_snotel_data = NULL,
+    canyon_q = NULL,
+    last_refresh = Sys.time()
+  )
 
-      req(date_range, sites_select, parameters_select)
-
-      sites_sel <- filter(site_table, site_name %in% sites_select) %>%
-        pull(site_code)
-
-      #Read in cached data which has been passed through autoQAQC
-      github_link <- "https://github.com/rossyndicate/uclp_dashboard/raw/main/data/data_backup.parquet"
-      #github_link <- "data/data_backup.parquet" #remove on live version and use ^ github link instead ^, this can be used for local testing
-      cached_data <- arrow::read_parquet(github_link, as_data_frame = TRUE)
-
-      #### ---- Data pull between QAQC and Live ---- ####
-      # #Calculate max datetimes in cached dataset by site
-      max_dts <- cached_data%>%
+#TODO: This is done at load up, should it be moved to global?
+  #### Pre loading API/Cached Data ####
+  observeEvent(home_state$start_sync(), {
+    req(home_state$start_sync() > 0)
+    
+    # "message" is the bold title, "detail" is the printed talking point
+    withProgress(message = "Dashboard Initialization", detail = "Starting up...", value = 0, {
+      
+      print("--- STARTING DATA INITIALIZATION ---")
+      incProgress(0.1, detail = "Retrieving pre-loaded data...")
+      
+      # Use the data already loaded by the home module
+      cached_data <- home_state$cached_df()
+      print(paste("Pre-loaded data retrieved. Total records:", nrow(cached_data)))
+      
+      #### ---- WET API PULL ---- ####
+      home_state$set_status("wet_api", "loading")
+      incProgress(0.15, detail = "Importing ROSS radio telemetry data (WET API)...")
+      
+      print("Calculating max datetimes in cached dataset by site...")
+      max_dts <- cached_data %>%
         summarise(max_DT = max(DT_round, na.rm = TRUE), .by = "site")
-
-      end_DT   <- as.POSIXct(paste0(date_range[2], " 23:55"), tz = "America/Denver")
-
-      #### WET API Pull ####
-      #check to see if we need to pull WET data
-      if(any(c("sfm", "chd", "pfal") %in% sites_sel)){
-        # Define invalid values to filter out (these are used by WET team for testing or if data is down)
-        invalid_values <- c(-9999, 638.30, -99.99)
-        # Define sites to pull data for
-        wet_sites <- c("sfm", "chd", "pfal")
-        #grab the sites from sites_sel
-        sites <- sites_sel[sites_sel %in% wet_sites]
-        #report out progress pre pull
-        #incProgress(0.2, detail = "Connecting to WET API...")
-        incProgress(0.2, detail = "Importing ROSS radio telemetry data...")
-        # Determine start date for each site based on cached data
-        site_start_DT <- filter(max_dts, site %in% sites)%>%
-          mutate(max_cached_DT = with_tz(max_DT, "America/Denver"))
-
-        # Pull in data from WET API for sfm, chd and pfal sites
-        wet_data <- map2(site_start_DT$site, site_start_DT$max_cached_DT,
-                         ~pull_wet_api(
-                           target_site = .x,
-                           start_datetime = .y,
-                           end_datetime = end_DT #always  today at midnight
-                         )) %>%
-          rbindlist()%>%
+      
+      # We pull data up to the end of the current day for initialization
+      end_DT <- as.POSIXct(paste0(Sys.Date(), " 23:55"), tz = "America/Denver")
+      
+      wet_sites <- c("sfm", "chd", "pfal")
+      invalid_values <- c(-9999, 638.30, -99.99)
+      
+      site_start_DT <- filter(max_dts, site %in% wet_sites) %>%
+        mutate(max_cached_DT = with_tz(max_DT, "America/Denver"))
+      
+      print(paste("Target WET sites identified:", paste(site_start_DT$site, collapse = ", ")))
+      
+      if(nrow(site_start_DT) > 0) {
+        print("Initiating WET API puller. This may take a moment depending on network connection...")
+        wet_data_raw <- map2(site_start_DT$site, site_start_DT$max_cached_DT,
+                         function(s, dt) {
+                           print(paste(" -> Pulling", s, "from", dt, "to", end_DT))
+                           pull_wet_api(
+                             target_site = s,
+                             start_datetime = dt,
+                             end_datetime = end_DT
+                           )
+                         }) %>%
+          rbindlist()
+        
+        print(paste("WET API pull returned", nrow(wet_data_raw), "raw rows."))
+        print("Cleaning WET data (removing invalid values and NAs)...")
+        
+        wet_data <- wet_data_raw %>%
           filter(value %nin% invalid_values, !is.na(value)) %>%
           split(f = list(.$site, .$parameter), sep = "-")
-
-        #Saving to parquet file for faster loading later on
-        #arrow::write_parquet(wet_data, paste0("data/wet_testing_subset_",as.Date(start_DT),"_",as.Date(end_DT),".parquet"))
-        #Pre loading API pulled data for faster displaying
-        #wet_data <- read_parquet(file = "data/wet_testing_subset_2025-06-22_2025-08-08.parquet")%>%   #Update dates as needed
-        #remove invalid values or NAs
-        # filter(value %nin% invalid_values, !is.na(value)) %>%
-        # split(f = list(.$site, .$parameter), sep = "-")
-
-
-      }else{
-        #return blank list
+          
+        print("WET data cleaning and splitting complete.")
+      } else {
+        print("No WET sites identified. Skipping pull.")
         wet_data <- list()
       }
+      
+      home_state$set_status("wet_api", "done")
+      
+      #### ---- HYDROVU & CONTRAIL API PULLS (MOCKED FOR NOW) ---- ####
+      # As requested, focusing only on WET dataset workflow first.
+      print("Skipping HydroVu and Contrail pulls for now (Mocking as done)...")
+      home_state$set_status("hydrovu_api", "done")
+      home_state$set_status("contrail_api", "done")
+      hv_data <- list()
+      contrail_data <- list()
+      
+      #### ---- CDWR FLOW API PULL ---- ####
+      home_state$set_status("cdwr_flow_api", "loading")
+      incProgress(0.15, detail = "Retrieving CDWR flow sites data...")
+      print("Pulling CDWR flow data for map/flow charts...")
+      
+      tryCatch({
+        sites <- read_csv(file = "data/cdwr_sites_oi.csv", show_col_types = F)
+        
+        if (nrow(sites) > 0) {
+          end_date <- as.character(Sys.Date() + days(1))
+          start_date <- as.character(Sys.Date() - days(7))
+          
+          flow_sites_res <- sites %>%
+            split(1:nrow(.)) %>%
+            map_dfr(function(site_row) {
+              site_id <- site_row$abbrev
+              param_code <- site_row$parameter
+              
+              make_empty_row <- function(msg = "No Data") {
+                site_row %>%
+                  as_tibble() %>%
+                  mutate(
+                    current_flow_cfs = NA_real_,
+                    flow_slope = NA_real_,
+                    trend = msg,
+                    nested_data = list(tibble(DT_round = as.POSIXct(character()), flow = numeric(), abbrev = character()))
+                  ) %>%
+                  select(abbrev, station_name, data_source, water_source, gnis_id, latitude, longitude,
+                         current_flow_cfs, flow_slope, trend, structure_type, site_type = station_type, nested_data)
+              }
+              
+              result <- tryCatch({
+                flow_data <- get_telemetry_ts(
+                  abbrev = site_id,
+                  parameter = param_code,
+                  start_date = start_date,
+                  end_date = end_date,
+                  api_key = cdwr_api_key,
+                  timescale = "raw"
+                ) %>%
+                  mutate(DT_round = round_date(datetime, "15 min")) %>%
+                  group_by(DT_round) %>%
+                  summarise(flow = mean(meas_value, na.rm = TRUE), .groups = "drop") %>%
+                  mutate(abbrev = site_id)
+                
+                if (nrow(flow_data) == 0) return(make_empty_row("No Records"))
+                
+                end_time <- Sys.time()
+                start_time_24h <- end_time - hours(24)
+                iv_data <- flow_data %>% filter(DT_round >= start_time_24h & DT_round <= end_time)
+                
+                if (nrow(iv_data) >= 2) {
+                  flow_model <- lm(flow ~ DT_round, data = iv_data)
+                  slope <- coef(flow_model)[2]
+                  
+                  current_flow <- iv_data %>%
+                    arrange(DT_round) %>%
+                    slice_tail(n = 1) %>%
+                    pull(flow)
+                  
+                  site_row %>%
+                    as_tibble() %>%
+                    mutate(
+                      current_flow_cfs = current_flow,
+                      flow_slope = slope * 3600,
+                      trend = if_else(current_flow_cfs == 0, "NoFlow",
+                                      if_else(flow_slope > 0, "increasing", "decreasing")),
+                      nested_data = list(flow_data)
+                    ) %>%
+                    select(abbrev, station_name, data_source, water_source, gnis_id, latitude, longitude,
+                           current_flow_cfs, flow_slope, trend, structure_type, site_type = station_type, nested_data)
+                } else {
+                  make_empty_row("Insufficient Data for Trend")
+                }
+              }, error = function(e) {
+                make_empty_row("API Error/No Records")
+              })
+              
+              return(result)
+            })
+            
+            values$flow_sites <- flow_sites_res
+            print(paste("CDWR flow data pulled successfully for", nrow(flow_sites_res), "sites."))
+        }
+      }, error = function(e) {
+        print(paste("CDWR Error:", e$message))
+      })
+      home_state$set_status("cdwr_flow_api", "done")
+      
+      #### ---- SNOTEL API PULL ---- ####
+      home_state$set_status("snotel_api", "loading")
+      incProgress(0.1, detail = "Retrieving SNOTEL snowpack data...")
+      print("Pulling SNOTEL data...")
+      tryCatch({
+        clp_snotel_url <- "https://nwcc-apps.sc.egov.usda.gov/awdb/basin-plots/POR/WTEQ/assocHUC8/10190007_Cache_La_Poudre.csv"
+        snotel_df <- read.csv(clp_snotel_url)
+        names(snotel_df) <- gsub("^X", "", names(snotel_df))
+        values$clp_snotel_data <- snotel_df
+        print("SNOTEL data pulled successfully.")
+      }, error = function(e) {
+        print(paste("SNOTEL Error:", e$message))
+      })
+      home_state$set_status("snotel_api", "done")
 
-      #### HydroVu API Pull ####
-
-      # check to see if we need to pull from PBD
-      if("pbd" %in% sites_sel){
-        sites <- c("pbd")
-
-        incProgress(0.4, detail = "Importing HydroVu Data...")
-
-        # Code to actually pull in from API
-
-        # # suppress scientific notation to ensure consistent formatting
-        options(scipen = 999)
-
-        # Establishing staging directory (temp_dir()) for storing API pulled data to merge with cached data
-        staging_directory = tempdir()
-
-        # Read in credentials
-        hv_creds <- read_yaml("creds/HydroVuCreds.yml")
-        hv_token <- hv_auth(client_id = as.character(hv_creds["client"]),
-                            client_secret = as.character(hv_creds["secret"]))
-
-        # Pulling in the data from hydrovu
-        # Making the list of sites that we need
-        hv_sites <- hv_locations_all(hv_token) %>%
-          filter(!grepl("vulink", name, ignore.case = TRUE)) %>%
-          #sondes with 2024 in the name can be avoided to speed up the live data pull
-          #these should be included in the historical data pull
-          filter(!grepl("2023|2024", name, ignore.case = TRUE))
-
-        site_start_DT <- filter(max_dts, site %in% sites)
-
-        walk(sites,
-             function(site) {
-               message("Requesting HV data for: ", site)
-               ross.wq.tools::api_puller(
-                 site = site_start_DT$site,
-                 start_dt = site_start_DT$max_DT, # api puller needs UTC dates
-                 end_dt = with_tz(end_DT, tzone = "UTC"),
-                 api_token = hv_token,
-                 hv_sites_arg = hv_sites,
-                 dump_dir = staging_directory
-               )
-             }
-        )
-        #
-        api_data <- map_dfr(list.files(staging_directory, full.names = TRUE, pattern = "*.parquet"),
-                            function(file_path) {
-                              site_df <- arrow::read_parquet(file_path, as_data_frame = TRUE)
-                              return(site_df)
-                            })
-
-        hv_data <- api_data %>%
-          # Remove ID column
-          dplyr::select(-id) %>%
-          # Ensure units are stored as character strings for consistency
-          dplyr::mutate(units = as.character(units))%>%
-          # Filter out VuLink data (not used in CSU/FCW networks)
-          #dplyr::filter(!grepl("vulink", name, ignore.case = TRUE)) %>%
-          # Filter out Virridy data (not used in CSU/FCW networks)
-          #dplyr::filter(!grepl("virridy", name, ignore.case = TRUE)) %>%
-          # Remove the equipment name column
-          #dplyr::select(-name) %>%
-          dplyr::mutate(
-            # Round timestamps to specified interval for consistent time series
-            DT = timestamp,
-            DT_round = lubridate::round_date(DT, "15 minutes"),
-            # Create string version of timestamp for joining operations
-            DT_join = as.character(DT_round),
-            # Ensure site names are lowercase for consistency
-            site = tolower(site)
-          ) %>%
-          # Ensure no duplicates after all transformations
-          dplyr::distinct(.keep_all = TRUE)%>%
-          split(f = list(.$site, .$parameter), sep = "-") %>%
-          keep(~nrow(.) > 0)
-      #
-      #
-      #   #Saving to parquet file for faster loading later on
-      #   #arrow::write_parquet(hv_data, paste0("data/hv_testing_subset_",as.Date(start_DT),"_",as.Date(end_DT),".parquet"))
-      #   #Pre loading API pulled data for faster displaying
-      #   # hv_data <- read_parquet(file = "data/hv_testing_subset_2025-06-22_2025-08-08.parquet")%>%   #Update dates as needed
-      #   #   split(f = list(.$site, .$parameter), sep = "-") %>%
-      #   #   keep(~nrow(.) > 0)
-      #
-      }else{
-        hv_data <- list()
-      }
-      #
-      # #### Contrail API Pull ####
-      #
-      #check to see if we need to access contrail
-      if(any(c("pbr_fc", "pman_fc") %in% sites_sel)) {
-        incProgress(0.7, detail = "Importing Contrail Data...")
-
-        # Define sites to pull data for
-        contrail_sites <- c("pbr_fc", "pman_fc")
-        #grab the sites from sites_sel
-        sites <- sites_sel[sites_sel %in% contrail_sites]
-
-        trim_sites <- toupper(gsub("_fc", "", sites))
-
-        # Read/set up credentials
-        creds <- yaml::read_yaml( "creds/ContrailCreds.yml") %>%
-          unlist()
-        username <- as.character(creds["username"])
-        password <- as.character(creds["password"])
-        login_url <- as.character(creds["login_url"])
-        # Determine start date for contrail sites based on cached data
-        contrail_start_DTs <- filter(max_dts, site %in% sites)%>%
-          mutate(max_cached_DT = with_tz(max_DT, "America/Denver"))
-
-        #get the earliest max date to ensure we get all data)
-        contrail_start_DT <- min(contrail_start_DTs$max_cached_DT)
-
-        # Call the downloader function
-        contrail_data <- pull_contrail_api(contrail_start_DT, end_DT, username,password, login_url)
-
-        #Saving to parquet file for faster loading later on
-        #arrow::write_parquet(contrail_data, paste0("data/contrail_testing_subset_",as.Date(start_DT),"_",as.Date(end_DT),".parquet"))
-        #Pre loading API pulled data for faster displaying
-        # contrail_data <- read_parquet(file = "data/contrail_testing_subset_2025-06-22_2025-08-08.parquet")%>%   #Update dates as needed
-        #   split(f = list(.$site, .$parameter), sep = "-") %>%
-        #   keep(~nrow(.) > 0)
-
-      }else{
-        contrail_data <- list()
-      }
+      #### ---- CANYON MOUTH HISTORICAL FLOW (For TOC Model) ---- ####
+      incProgress(0.1, detail = "Retrieving Canyon Mouth historical flow data...")
+      print("Pulling historical flow for Canyon Mouth (CLAFTCCO)...")
+      tryCatch({
+        # Find min and max date from cached data for the historical pull
+        min_date <- as.Date(min(cached_data$DT_round, na.rm = TRUE)) - days(1)
+        max_date <- as.Date(max(cached_data$DT_round, na.rm = TRUE)) + days(1)
+        
+        canyon_q_res <- cdssr::get_telemetry_ts(
+          abbrev = "CLAFTCCO",
+          start_date = min_date,
+          end_date = max_date,
+          api_key = cdwr_api_key,
+          timescale = "hour"
+        ) %>%
+          mutate(date = as_date(datetime, tz = "America/Denver")) %>%
+          summarize(canyon_mouth_daily_flow_cfs = mean(meas_value, na.rm = TRUE), .by = date)
+        
+        values$canyon_q <- canyon_q_res
+        print("Historical flow pulled successfully.")
+      }, error = function(e) {
+        print(paste("Canyon Flow Error:", e$message))
+      })
 
       #### Data Aggregation  ####
-
-      incProgress(0.9, detail = "Processing data...")
-      # combine all data
+      incProgress(0.1, detail = "Processing data...")
+      print("Aggregating API data...")
       all_data_raw <- c(hv_data, wet_data, contrail_data)
 
-      # remove stage data
       list_names <- names(all_data_raw)
       keep_indices <- !grepl("stage", list_names, ignore.case = TRUE)
       all_data_raw <- all_data_raw[keep_indices]
-      # Failsafe if there is no data
+      
       if(length(all_data_raw) == 0){
-        stop("No data found for the selected sites and date range.")
+        print("Warning: No new API data found.")
+        combined_data <- data.frame()
+      } else {
+        print("Tidying API data...")
+        tidy_data <- all_data_raw %>%
+          map(~tidy_api_data(api_data = .)) %>%  
+          keep(~!is.null(.))
+
+        print("Pulling field notes from mWater...")
+        mWater_creds <- read_yaml("creds/mWaterCreds.yml")
+        mWater_data <- load_mWater(creds = mWater_creds)
+        
+        all_field_notes <- grab_mWater_sensor_notes(mWater_api_data = mWater_data) %>%
+          mutate(DT_round = with_tz(DT_round, tzone = "UTC"),
+                 last_site_visit = with_tz(last_site_visit, tzone = "UTC"),
+                 DT_join = as.character(DT_round))
+
+        sensor_malfunction_notes <- grab_mWater_malfunction_notes(mWater_api_data = mWater_data) %>%
+          mutate(start_DT = with_tz(start_DT, tzone = "UTC"),
+                 end_DT = with_tz(end_DT, tzone = "UTC"))
+
+        print("Adding field notes to tidied data...")
+        combined_data <- tidy_data %>%
+          map(~add_field_notes(df = ., notes = all_field_notes), .progress = TRUE) %>%
+          bind_rows() %>%
+          mutate(auto_flag = NA,
+                 mal_flag = NA)
       }
 
-      # Tidy all the raw files
-      tidy_data <- all_data_raw %>%
-        map(~tidy_api_data(api_data = .)) %>%  # the summarize interval default is 15 minutes
-        keep(~!is.null(.))
-
-      #add field notes
-      # Pulling in the data from mWater (where we record our field notes)
-      mWater_creds <- read_yaml("creds/mWaterCreds.yml")
-      mWater_data <- load_mWater(creds = mWater_creds)
-      all_field_notes <- grab_mWater_sensor_notes(mWater_api_data = mWater_data) %>%
-        #notes come in as MST, converting to UTC
-        mutate(DT_round = with_tz(DT_round, tzone = "UTC"),
-               last_site_visit = with_tz(last_site_visit, tzone = "UTC"),
-               DT_join = as.character(DT_round))
-
-      sensor_malfunction_notes <- grab_mWater_malfunction_notes(mWater_api_data = mWater_data) %>%
-        #notes come in as MST, converting to UTC
-        mutate(start_DT = with_tz(start_DT, tzone = "UTC"),
-               end_DT = with_tz(end_DT, tzone = "UTC"))
-
-      # Add the field note data to all of the data
-      # This is the most recent uncleaned data that we got from the API
-      combined_data <- tidy_data %>%
-        map(~add_field_notes(df = ., notes = all_field_notes), .progress = TRUE)%>%
-        bind_rows()%>%
-        mutate(auto_flag = NA,
-               mal_flag = NA)
-      #### ---- End of data pull between QAQC and Live ---- ####
-
-
-      dashboard_data <- cached_data %>%
-        bind_rows(combined_data) %>% #unhash for live version (this is live data)
-        arrange(site, parameter, DT_round) %>%
-        distinct(site, parameter, DT_round, .keep_all = TRUE) %>%
-        ungroup()
-
-
-      # Set the loaded data
-      incProgress(1, detail = "Data Loaded")
-
+      incProgress(0.1, detail = "Structuring and deduplicating dataset...")
+      print("Merging new data with cached data and deduplicating...")
+      
+      if(nrow(combined_data) > 0) {
+        dashboard_data <- bind_rows(cached_data, combined_data) %>%
+          arrange(site, parameter, DT_round) %>%
+          distinct(site, parameter, DT_round, .keep_all = TRUE) %>%
+          ungroup()
+      } else {
+        dashboard_data <- cached_data %>%
+          arrange(site, parameter, DT_round) %>%
+          distinct(site, parameter, DT_round, .keep_all = TRUE) %>%
+          ungroup()
+      }
+      
+      print("--- DATA INITIALIZATION COMPLETE ---")
+      Sys.sleep(0.5) 
+      incProgress(0.1, detail = "Data successfully loaded!")
+      
+      # Finalize Initialization
       loaded_data(dashboard_data)
+      home_state$set_status("all_done", TRUE)
+      showNotification("Data streams initialized successfully!", type = "message")
     })
   })
 
@@ -301,12 +321,16 @@ server <- function(input, output, session) {
 
     sites_sel <- filter(site_table, site_name %in% input$sites_select) %>% pull(site_code)
 
+    # Ensure we include required parameters for TOC model even if not selected for other plots
+    required_toc_params <- c("FDOM Fluorescence", "Temperature", "Specific Conductivity", "Turbidity", "Chl-a Fluorescence")
+    all_params <- unique(c(input$parameters_select, required_toc_params))
+
     loaded_data() %>%
       mutate(DT_round_MT = with_tz(DT_round, tzone = "America/Denver")) %>%
       filter(
         between(DT_round_MT, start_DT, end_DT),
         site %in% sites_sel,
-        parameter %in% input$parameters_select
+        parameter %in% all_params
       ) %>%
       mutate(
         mean = ifelse(!is.na(mal_flag), NA, mean),
@@ -327,21 +351,23 @@ server <- function(input, output, session) {
         # apply binomial filter to turbidity and Chl-a
         apply_low_pass_binomial_filter(df = .,  value_col = "mean_filled", new_value_col = "mean_smoothed", dt_col = "DT_round_MT")%>%
         # apply timestep median to reduce noise
-        apply_timestep_median(df = ., value_col = "mean_smoothed", new_value_col = "timestep_median", timestep = input$data_timestep, dt_col = "DT_round_MT")%>%
+        mutate(DT_round = as.POSIXct(DT_round_MT)) %>%
+        apply_timestep_median(df = ., value_col = "mean_smoothed", new_value_col = "timestep_median", timestep = input$data_timestep, dt_col = "DT_round") %>%
         #trim down dataset and rename columns
-        select(DT_round_MT = DT_group, site, parameter, mean = timestep_median)%>%
+        select(DT_round = DT_group, site, parameter, mean = timestep_median)%>%
         #remove duplicates
-        distinct(site, parameter, mean, DT_round_MT, .keep_all = TRUE)
+        distinct(site, parameter, mean, DT_round, .keep_all = TRUE)
 
     } else {
       # If QA/QC filter is not applied, just return base filtered data with timestep median applied
       apply_interpolation_missing_data(df = base_filtered_data(),  value_col = "mean", dt_col = "DT_round_MT", method = "linear", max_gap = 4)%>%
-        #take timestep median
-        apply_timestep_median(df = ., value_col = "mean_filled", new_value_col = "timestep_median", timestep = input$data_timestep, dt_col = "DT_round_MT")%>%
+        # take timestep median
+        mutate(DT_round = as.POSIXct(DT_round_MT)) %>%
+        apply_timestep_median(df = ., value_col = "mean_filled", new_value_col = "timestep_median", timestep = input$data_timestep, dt_col = "DT_round") %>%
         #trim down dataset and rename columns
-        select(DT_round_MT = DT_group, site, parameter, mean = timestep_median)%>%
+        select(DT_round = DT_group, site, parameter, mean = timestep_median)%>%
         #remove duplicates
-        distinct(site, parameter, mean, DT_round_MT, .keep_all = TRUE)
+        distinct(site, parameter, mean, DT_round, .keep_all = TRUE)
     }
   })
 
@@ -447,7 +473,7 @@ server <- function(input, output, session) {
 
         # Create the plotly plot
         p <- plot_ly(plot_data,
-                     x = ~DT_round_MT,
+                     x = ~DT_round,
                      y = ~mean,
                      type = "scatter",
                      color = ~site,
@@ -482,7 +508,7 @@ server <- function(input, output, session) {
       filter(!str_detect( site, "_fc")) #FC sondes will not have correct parameters so we can omit them entirely
 
     # Define required parameters
-    required_params <- c("FDOM Fluorescence", "Temperature", "Specific Conductivity","Turbidity")
+    required_params <- c("FDOM Fluorescence", "Temperature", "Specific Conductivity", "Turbidity", "Chl-a Fluorescence")
     # Check if all required parameters are present
     available_params <- unique(input_data$parameter)
     missing_params <- setdiff(required_params, available_params)
@@ -535,12 +561,13 @@ server <- function(input, output, session) {
     }
     # Apply TOC model on relevant data
     toc_plot_data <- apply_toc_model(sensor_data = input_data,
-                                     toc_model_file_path = "data/models/ross_only_toc_xgboost_models_light_20260224.rds",
+                                     #toc_model_file_path = "data/models/ross_only_toc_xgboost_models_light_20260224.rds",
                                      scaling_params_file_path = "data/models/scaling_params_toc_20260224.parquet",
                                      #summarizing model input results to user selected timestep (15 min -> 1 day)
                                      summarize_interval = input$data_timestep,
-                                     time_col = "DT_round_MT",
-                                     value_col = "mean") %>%
+                                     time_col = "DT_round",
+                                     value_col = "mean",
+                                     canyon_q_data = values$canyon_q) %>%
       left_join(site_table, by = c("site" = "site_code"))%>%
       mutate(across(contains("TOC_guess"), ~ round(.x, 2)))
     #parameter to plot
@@ -562,20 +589,33 @@ server <- function(input, output, session) {
       output[[paste0("toc_plot_", site_cd)]] <- renderPlotly({
         site_toc_data <- toc_plot_data %>%
           filter(site_name == site_cd)%>%
-          arrange(DT_round_MT) %>%
+          arrange(DT_round) %>%
           mutate(
             gap = is.na(TOC_guess_min) | is.na(TOC_guess_max) | is.na(.data[[plot_param]]),
             gid = cumsum(lag(gap, default = TRUE) != gap)
           ) %>%
           filter(!gap)
 
+        if (nrow(site_toc_data) == 0) {
+          # Return empty plot safely if no data
+          return(
+            plot_ly() %>% 
+              add_text(x = 0.5, y = 0.5, text = "No TOC data available for this date range.",
+                       textfont = list(size = 16, color = "red"),
+                       showlegend = FALSE) %>%
+              layout(
+                xaxis = list(showgrid = FALSE, showticklabels = FALSE, zeroline = FALSE, range = c(0, 1)),
+                yaxis = list(showgrid = FALSE, showticklabels = FALSE, zeroline = FALSE, range = c(0, 1))
+              ) %>% config(displayModeBar = FALSE)
+          )
+        }
 
         #get sample data
         site_samples <- water_chem%>%
           left_join(site_table, by = c("site_code"))%>%
           filter(site_name == site_cd & !is.na(TOC))%>%
           mutate(DT_round = with_tz(round_date(DT_sample, unit = "15 minutes"), tzone = "America/Denver"))%>%
-          filter(between(DT_round, min(site_toc_data$DT_round_MT) - days(1), max(site_toc_data$DT_round_MT) + days(1)))
+          filter(between(DT_round, min(site_toc_data$DT_round) - days(1), max(site_toc_data$DT_round) + days(1)))
 
 
         p <- plot_ly() %>%
@@ -610,7 +650,7 @@ server <- function(input, output, session) {
             p <- p %>%
               add_ribbons(
                 data = d,
-                x = ~DT_round_MT,
+                x = ~DT_round,
                 ymin = ~TOC_guess_min,
                 ymax = ~TOC_guess_max,
                 fillcolor = "grey",
@@ -630,7 +670,7 @@ server <- function(input, output, session) {
             p <- p %>%
               add_lines(
                 data = d,
-                x = ~DT_round_MT,
+                x = ~DT_round,
                 y = ~.data[[plot_param]],
                 line = list(color = "#E70870", width = 2),
                 name = "Mean Model Estimate",
@@ -674,8 +714,17 @@ server <- function(input, output, session) {
 
         # Determine y-axis limits
         if(nrow(param_bounds) > 0 && nrow(toc_plot_data) > 0) {
-          data_min <- min(site_toc_data$TOC_guess_min, site_samples$TOC,  na.rm = TRUE)
-          data_max <- max(site_toc_data$TOC_guess_max,site_samples$TOC,  na.rm = TRUE)
+          # Combine data safely
+          all_vals <- c(site_toc_data$TOC_guess_min, site_toc_data$TOC_guess_max)
+          if (nrow(site_samples) > 0) {
+            all_vals <- c(all_vals, site_samples$TOC)
+          }
+          
+          data_min <- suppressWarnings(min(all_vals, na.rm = TRUE))
+          data_max <- suppressWarnings(max(all_vals, na.rm = TRUE))
+          
+          if (is.infinite(data_min)) data_min <- param_bounds$lower
+          if (is.infinite(data_max)) data_max <- param_bounds$upper
 
           # Use parameter bounds as default, but extend if data goes outside
           y_min <- min(param_bounds$lower, data_min)
@@ -702,7 +751,7 @@ server <- function(input, output, session) {
         # add preliminary text to annotations
         # annotations_list <- append(annotations_list,
         #                            list(
-        #                              x = max(site_toc_data$DT_round_MT, na.rm = TRUE),
+        #                              x = max(site_toc_data$DT_round, na.rm = TRUE),
         #                              y = y_max * 0.85,
         #                              text = "PRELIMINARY RESULTS",
         #                              showarrow = FALSE,
@@ -772,85 +821,15 @@ server <- function(input, output, session) {
   #### TOC Forecast Plots ####
   # Generate Intake Forecast Plot
   output$intake_toc_forecast_plot <- renderPlotly({
-    intake_forecast_github_link <- "https://github.com/rossyndicate/uclp_dashboard/raw/main/data/toc_forecast_intake_backup.parquet"
-
-    intake_cached_data <- arrow::read_parquet(intake_forecast_github_link, as_data_frame = TRUE)%>%
+    intake_cached_data <- arrow::read_parquet(intake_forecast_url, as_data_frame = TRUE)%>%
       filter(date == max(date, na.rm = TRUE)) %>% # Get the most recent forecast date
       mutate(across(contains("intake_q_swe_pred"), ~ round(.x, 2)))%>%
       filter(date_24h <= Sys.Date() + days(10)) #Limit to the next 10 days
 
-    # Extract the forecast creation date for the title
-    forecast_date <- unique(intake_cached_data$date)[1]
-    site_name <- "Fort Collins Poudre River Intake"
-
-    # Define RGBA colors
-    col_red    <- 'rgba(255, 0, 0, 0.2)'
-    col_orange <- 'rgba(255, 165, 0, 0.2)'
-    col_green  <- 'rgba(0, 255, 0, 0.2)'
-    col_blue   <- 'rgba(0, 0, 255, 0.2)'
-
-    # Reference lines
-    ref_lines <- c(2, 4, 8)
-    hline_shapes <- lapply(ref_lines, function(y_val) {
-      list(
-        type = "line", x0 = 0, x1 = 1, xref = "paper", y0 = y_val, y1 = y_val, yref = "y",
-        line = list(color = "rgba(0, 0, 0, 0.4)", width = 1.5, dash = "dash")
-      )
-    })
-
-    # Create plot
-    p <- plot_ly(intake_cached_data, x = ~date_24h) %>%
-      # Ribbons: showlegend = FALSE and hoverinfo = "none" to hide them from UI
-      add_ribbons(ymin = ~intake_q_swe_pred_q75, ymax = ~intake_q_swe_pred_max,
-                  fillcolor = col_red, line = list(color = 'transparent'),
-                  showlegend = FALSE, hoverinfo = "none") %>%
-      add_ribbons(ymin = ~intake_q_swe_pred, ymax = ~intake_q_swe_pred_q75,
-                  fillcolor = col_orange, line = list(color = 'transparent'),
-                  showlegend = FALSE, hoverinfo = "none") %>%
-      add_ribbons(ymin = ~intake_q_swe_pred_q25, ymax = ~intake_q_swe_pred,
-                  fillcolor = col_green, line = list(color = 'transparent'),
-                  showlegend = FALSE, hoverinfo = "none") %>%
-      add_ribbons(ymin = ~intake_q_swe_pred_min, ymax = ~intake_q_swe_pred_q25,
-                  fillcolor = col_blue, line = list(color = 'transparent'),
-                  showlegend = FALSE, hoverinfo = "none") %>%
-
-      # BLACK MEDIAN LINE: This carries the hover info for ALL quantiles
-      add_lines(
-        y = ~intake_q_swe_pred,
-        line = list(color = "black", width = 2.5),
-        name = "Median Prediction",
-        text = ~paste0(
-          "Max: ", intake_q_swe_pred_max, " mg/L<br>",
-          "Q75: ", intake_q_swe_pred_q75, " mg/L<br>",
-          "Median: ", intake_q_swe_pred, " mg/L<br>",
-          "Q25: ", intake_q_swe_pred_q25, " mg/L<br>",
-          "Min: ", intake_q_swe_pred_min, " mg/L"
-        ),
-        hovertemplate = "%{text}<extra></extra>"
-      ) %>%
-
-      layout(
-        title = list(
-          text = paste0("Fort Collins Poudre River Intake TOC Forecast",
-                        "<br><sup>Forecast Created: ", forecast_date, " 3:00 AM </sup>"),
-          x = 0.1
-        ),
-        xaxis = list(title = "Date"),
-        yaxis = list(
-          title = "Predicted Intake TOC (mg/L)",
-          range = c(min( intake_cached_data$intake_q_swe_pred_min) - 0.2, max( intake_cached_data$intake_q_swe_pred_max) + 0.2)
-
-        ),
-        shapes = hline_shapes,
-        hovermode = "x unified",
-        # Legend now only shows the Median Line
-        legend = list(orientation = 'h', y = -0.2)
-      )
-
-    p
+    plot_toc_forecast(intake_cached_data, title_suffix = "Fort Collins Poudre River Intake TOC Forecast")
   })
 
-  # Generate Intake Forecast Plot
+  # Generate Distributed Forecast Plots
   output$dist_toc_forecast_plots <- renderUI({
     req(input$toc_forecast_sites)
 
@@ -874,29 +853,20 @@ server <- function(input, output, session) {
   })
 
   # Create Distributed TOC Forecast Plots
-
   observe({
     # Ensure input is available
     req(input$toc_forecast_sites)
 
-    distributed_forecast_github_link <- "https://github.com/rossyndicate/uclp_dashboard/raw/main/data/toc_forecast_distributed_backup.parquet"
-
     # Load and filter
-    dist_cached_data <- arrow::read_parquet(distributed_forecast_github_link, as_data_frame = TRUE) %>%
+    dist_cached_data <- arrow::read_parquet(distributed_forecast_url, as_data_frame = TRUE) %>%
       mutate(across(contains("pred_toc"), ~ round(.x, 2))) %>%
       filter(date == max(date, na.rm = TRUE)) %>% # Get the most recent forecast date
-      filter(date_24h <= Sys.Date() + days(10))%>%
-      filter(site_name %in% input$toc_forecast_sites) # Filter by user selection
+      filter(date_24h <= Sys.Date() + days(10))
 
     sites <- unique(dist_cached_data$site_name)
-    forecast_date <- unique(dist_cached_data$date)[1]
+    selected_sites <- sites[sites %in% input$toc_forecast_sites]
 
-    col_red    <- 'rgba(255, 0, 0, 0.2)'
-    col_orange <- 'rgba(255, 165, 0, 0.2)'
-    col_green  <- 'rgba(0, 255, 0, 0.2)'
-    col_blue   <- 'rgba(0, 0, 255, 0.2)'
-
-    for (site in sites) {
+    for (site in selected_sites) {
       local({
         current_site <- site
         clean_site_id <- gsub("[^[:alnum:]]", "_", current_site)
@@ -905,94 +875,10 @@ server <- function(input, output, session) {
         site_data <- dist_cached_data %>% filter(site_name == current_site)
 
         output[[plot_id]] <- renderPlotly({
-          plot_ly(site_data, x = ~date_24h) %>%
-            add_ribbons(ymin = ~dist_q75_pred_toc, ymax = ~dist_max_pred_toc,
-                        fillcolor = col_red, line = list(color = 'transparent'),
-                        showlegend = FALSE, hoverinfo = "none") %>%
-            add_ribbons(ymin = ~dist_mean_pred_toc, ymax = ~dist_q75_pred_toc,
-                        fillcolor = col_orange, line = list(color = 'transparent'),
-                        showlegend = FALSE, hoverinfo = "none") %>%
-            add_ribbons(ymin = ~dist_q25_pred_toc, ymax = ~dist_mean_pred_toc,
-                        fillcolor = col_green, line = list(color = 'transparent'),
-                        showlegend = FALSE, hoverinfo = "none") %>%
-            add_ribbons(ymin = ~dist_min_pred_toc, ymax = ~dist_q25_pred_toc,
-                        fillcolor = col_blue, line = list(color = 'transparent'),
-                        showlegend = FALSE, hoverinfo = "none") %>%
-            add_lines(
-              y = ~dist_mean_pred_toc,
-              line = list(color = "black", width = 2),
-              name = "Forecast",
-              text = ~paste0(
-                "<b>", current_site, "</b><br>",
-                "Max: ", dist_max_pred_toc, " mg/L<br>",
-                "Q75: ", dist_q75_pred_toc, " mg/L<br>",
-                "Mean: ", dist_mean_pred_toc, " mg/L<br>",
-                "Q25: ", dist_q25_pred_toc, " mg/L<br>",
-                "Min: ", dist_min_pred_toc, " mg/L"
-              ),
-              hovertemplate = "%{text}<extra></extra>"
-            ) %>%
-            layout(
-              yaxis = list(
-                title = "TOC (mg/L)",
-                range = c(min(site_data$dist_min_pred_toc) - 0.2, max(site_data$dist_max_pred_toc) + 0.2)
-              ),
-              xaxis = list(title = "Date"),
-              shapes = list(
-                list(type = "line", x0 = 0, x1 = 1, xref = "paper", y0 = 2, y1 = 2,
-                     line = list(dash = "dash", color = "gray", width = 1)),
-                list(type = "line", x0 = 0, x1 = 1, xref = "paper", y0 = 4, y1 = 4,
-                     line = list(dash = "dash", color = "gray", width = 1)),
-                list(type = "line", x0 = 0, x1 = 1, xref = "paper", y0 = 8, y1 = 8,
-                     line = list(dash = "dash", color = "gray", width = 1))
-              ),
-              hovermode = "x unified",
-              showlegend = FALSE,
-              margin = list(t = 30)
-            )
+          plot_toc_forecast(site_data, title_suffix = paste0("Distributed Forecast: ", current_site))
         })
       })
     }
-  })
-
-  #### Site Map Output ####
-  #### Get site locations from metadata ####
-  observeEvent(input$sites_select, {
-    sites_sel <- filter(site_table, site_name %in% input$sites_select )%>%
-      pull(site_code)
-    # Sample site locations
-    values$site_locations <- read_csv("data/sonde_location_metadata.csv", show_col_types = F) %>%
-      separate(col = "lat_long", into = c("lat", "lon"), sep = ",", convert = TRUE) %>%
-      st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
-      mutate(site = tolower(Site),
-             site = ifelse(site %in% c("pman", "pbr"), paste0(site, "_fc"), site))%>%
-      filter(site %in% sites_sel)%>%
-      left_join(site_table, by = c("site" = "site_code" ))
-  })
-  #### Generate site map ####
-  output$site_map <- renderLeaflet({
-    req(values$site_locations)
-
-    pal <- colorFactor(
-      palette = c("red", "blue", "green", "purple", "orange"),
-      domain = values$site_locations$watershed
-    )
-
-    leaflet(values$site_locations) %>%
-      addTiles() %>%
-      addCircleMarkers(
-        radius = 8,
-        color = ~pal(watershed),
-        fillOpacity = 0.7,
-        popup = ~paste("Site:", site_name, "<br>",
-                       "Watershed:", watershed)
-      ) %>%
-      addLegend(
-        pal = pal,
-        values = ~watershed,
-        title = "Watershed",
-        position = "bottomright"
-      )
   })
 
   #### Flow data Page ####
@@ -1000,109 +886,8 @@ server <- function(input, output, session) {
   #TODO: pull out into separate function to clean up server and make more modular
   # get data for site conditions
   flow_sites_data <- reactive({
-    withProgress(message = "Retrieving Poudre flow sites data...", {
-
-      #Code used to generate the list of sites stored in `data/cdwr_sites_oi.csv` to pull data for (only need to run this once and can save the output as a CSV to read in later)
-      # clp_sites <- get_telemetry_stations(water_district = 3 )%>% # Specify Poudre basin
-      #   filter(station_por_end > Sys.Date() - days(30))%>%# only grab active sites
-      #   filter(grepl("DIS", parameter))#filter for flow sites only
-      #
-      # laramie_sites <- get_telemetry_stations(water_district = 48 )%>% # Specify Laramie basin
-      #   filter(station_por_end > Sys.Date() - days(30))%>%# only grab active sites
-      #   filter(grepl("DIS", parameter))#filter for flow sites only
-      #
-      # sites <- bind_rows(clp_sites, laramie_sites)%>%
-      #   filter(abbrev %in% cdwr_upper_clp_sites)
-
-      sites <- read_csv(file = "data/cdwr_sites_oi.csv", show_col_types = F)
-
-      # If no sites found, return empty tibble
-      if (nrow(sites) == 0) {
-        return(tibble())
-      }
-
-      # Define date range for the last 8 days
-      end_date <- as.character(Sys.Date()+ days(1))
-      start_date <- as.character(Sys.Date() - days(7))
-
-      # Map over sites to get the last 7 days of flow
-      active_sites <- sites %>%
-        split(1:nrow(.)) %>%
-        map_dfr(function(site_row) {
-          site_id <- site_row$abbrev
-          param_code <- site_row$parameter
-
-          # Pre-define empty/failure row structure to ensure consistency
-          make_empty_row <- function(msg = "No Data") {
-            site_row %>%
-              as_tibble() %>%
-              mutate(
-                current_flow_cfs = NA_real_,
-                flow_slope = NA_real_,
-                trend = msg,
-                nested_data = list(tibble(DT_round = as.POSIXct(character()), flow = numeric(), abbrev = character()))
-              ) %>%
-              select(abbrev, station_name, data_source, water_source, gnis_id, latitude, longitude,
-                     current_flow_cfs, flow_slope, trend, structure_type, site_type = station_type, nested_data)
-          }
-
-          result <- tryCatch({
-            # 1. API Call
-            flow_data <- get_telemetry_ts(
-              abbrev = site_id,
-              parameter = param_code,
-              start_date = start_date,
-              end_date = end_date,
-              api_key = cdwr_api_key,
-              timescale = "raw"
-            ) %>%
-              mutate(DT_round = round_date(datetime, "15 min")) %>%
-              group_by(DT_round) %>%
-              summarise(flow = mean(meas_value, na.rm = TRUE), .groups = "drop") %>%
-              mutate(abbrev = site_id)
-
-            # 2. Validation: Do we have any data at all?
-            if (nrow(flow_data) == 0) return(make_empty_row("No Records"))
-
-            # 3. Filter for recent 24h
-            end_time <- Sys.time()
-            start_time <- end_time - hours(24)
-            iv_data <- flow_data %>% filter(DT_round >= start_time & DT_round <= end_time)
-
-            # 4. Calculate metrics if enough data exists for regression (min 2 points)
-            if (nrow(iv_data) >= 2) {
-              flow_model <- lm(flow ~ DT_round, data = iv_data)
-              slope <- coef(flow_model)[2]
-
-              current_flow <- iv_data %>%
-                arrange(DT_round) %>%
-                slice_tail(n = 1) %>%
-                pull(flow)
-
-              site_row %>%
-                as_tibble() %>%
-                mutate(
-                  current_flow_cfs = current_flow,
-                  flow_slope = slope * 3600, # cfs/hr
-                  trend = if_else(current_flow_cfs == 0, "NoFlow",
-                                  if_else(flow_slope > 0, "increasing", "decreasing")),
-                  nested_data = list(flow_data)
-                ) %>%
-                select(abbrev, station_name, data_source, water_source, gnis_id, latitude, longitude,
-                       current_flow_cfs, flow_slope, trend, structure_type, site_type = station_type, nested_data)
-            } else {
-              # Has data, but not enough for a 24h trend
-              make_empty_row("Insufficient Data for Trend")
-            }
-
-          }, error = function(e) {
-            # Handle API Errors (like MUNCANCO returning 0 records)
-            make_empty_row("API Error/No Records")
-          })
-
-          return(result)
-        })
-    })
+    req(values$flow_sites)
+    values$flow_sites
   })
   # Create the map of the flow sites
   output$map <- renderLeaflet({
@@ -1277,13 +1062,8 @@ server <- function(input, output, session) {
   # Generate SNOTEL plot (will only be displayed if the card is visible)
   #TODO: Functionalize similar to clp rainbow plot to clean up server and make it more modular
   output$snotel_plot <- renderPlotly({
-
-    clp_snotel_url <- "https://nwcc-apps.sc.egov.usda.gov/awdb/basin-plots/POR/WTEQ/assocHUC8/10190007_Cache_La_Poudre.csv"
-    #download the csv
-    #clp_snotel_data <- read.csv(clp_snotel_url, skip = 1)
-    clp_snotel_data <- read.csv(clp_snotel_url)
-    #drop the X from names
-    names(clp_snotel_data) <- gsub("^X", "", names(clp_snotel_data))
+    req(values$clp_snotel_data)
+    clp_snotel_data <- values$clp_snotel_data
 
     #grab last year
     cur_year = year(Sys.Date())

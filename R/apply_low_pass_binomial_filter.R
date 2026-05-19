@@ -1,3 +1,11 @@
+# Define missing helper function if not in ross.wq.tools
+add_column_if_not_exists <- function(df, column_name, default_value = NA) {
+  if (!column_name %in% colnames(df)) {
+    df <- df %>% dplyr::mutate(`:=`(!!sym(column_name), default_value))
+  }
+  return(df)
+}
+
 #' @title Apply low-pass binomial filter to reduce sensor noise
 #' @export
 #'
@@ -74,17 +82,17 @@ apply_low_pass_binomial_filter <- function(df,
           mutate(
             # First pass
             !!sym(new_value_col) := data.table::frollapply(
-              !!sym(value_col), n = 5, FUN = binomial_kernel,
+              !!sym(value_col), N = 5, FUN = binomial_kernel,
               fill = NA, align = "center"
             ),
             # Second pass
             !!sym(new_value_col) := data.table::frollapply(
-              !!sym(new_value_col), n = 5, FUN = binomial_kernel,
+              !!sym(new_value_col), N = 5, FUN = binomial_kernel,
               fill = NA, align = "center"
             ),
             # Third pass
             !!sym(new_value_col) := data.table::frollapply(
-              !!sym(new_value_col), n = 5, FUN = binomial_kernel,
+              !!sym(new_value_col), N = 5, FUN = binomial_kernel,
               fill = NA, align = "center"
             )
           )
