@@ -210,7 +210,7 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
         "&mode=&hours=&data_start=", start_DT_encoded,
         "&data_end=", end_DT_encoded,
         "&tz=US%2FMountain&format_datetime=%25Y-%25m-%25d+%25H%3A%25i%3A%25S&mime=txt&delimiter=comma"
-      )
+      )[1]
 
       tryCatch({
         #request download from encoded url
