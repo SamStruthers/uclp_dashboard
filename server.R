@@ -4,26 +4,31 @@
 server <- function(input, output, session) {
   # Store the main session in userData for module access
   session$userData$parent_session <- session
-  
+
   # Call secure_server to check credentials
-  # res_auth <- secure_server(
-  #   check_credentials = check_credentials(
-  #     db = "setup/credentials.sqlite",
-  #     passphrase = Sys.getenv("DB_PASSWORD")
-  #   )
-  # )
+  #Comment out for local testing without credentials
+  res_auth <- secure_server(
+    check_credentials = check_credentials(
+      db = "setup/credentials.sqlite",
+      passphrase = Sys.getenv("DB_PASSWORD")
+    )
+  )
 
   #setup loaded data
   loaded_data <- reactiveVal(NULL)
 
   # Initialize home module
-  home_state <- home_server("home", loaded_data)
+  home_state <- home_server("home", loaded_data
+                            , auth = res_auth) #comment our auth for local testing without credentials
+                            #un comment line below for production with credentials:
+                            # , auth = list( user = "user_name"))
+
 
   # Sidebar Gating Logic
   observe({
     # List of tabs to disable until full sync is complete
     tabs_to_gate <- c("sensor_data", "flow_data", "toc_forecasts")
-    
+
     if (home_state$full_sync_done()) {
       for (tab in tabs_to_gate) {
         shinyjs::removeCssClass(selector = paste0("a[data-value='", tab, "']"), class = "disabled-menu")
@@ -52,36 +57,36 @@ server <- function(input, output, session) {
   #### Pre loading API/Cached Data ####
   observeEvent(home_state$start_sync(), {
     req(home_state$start_sync() > 0)
-    
+
     # "message" is the bold title, "detail" is the printed talking point
     withProgress(message = "Dashboard Initialization", detail = "Starting up...", value = 0, {
-      
+
       print("--- STARTING DATA INITIALIZATION ---")
       incProgress(0.1, detail = "Retrieving pre-loaded data...")
-      
+
       # Use the data already loaded by the home module
       cached_data <- home_state$cached_df()
       print(paste("Pre-loaded data retrieved. Total records:", nrow(cached_data)))
-      
+
       #### ---- WET API PULL ---- ####
       home_state$set_status("wet_api", "loading")
       incProgress(0.15, detail = "Importing ROSS radio telemetry data (WET API)...")
-      
+
       print("Calculating max datetimes in cached dataset by site...")
       max_dts <- cached_data %>%
         summarise(max_DT = max(DT_round, na.rm = TRUE), .by = "site")
-      
+
       # We pull data up to the end of the current day for initialization
       end_DT <- as.POSIXct(paste0(Sys.Date(), " 23:55"), tz = "America/Denver")
-      
+
       wet_sites <- c("sfm", "chd", "pfal")
       invalid_values <- c(-9999, 638.30, -99.99)
-      
+
       site_start_DT <- filter(max_dts, site %in% wet_sites) %>%
         mutate(max_cached_DT = with_tz(max_DT, "America/Denver"))
-      
+
       print(paste("Target WET sites identified:", paste(site_start_DT$site, collapse = ", ")))
-      
+
       if(nrow(site_start_DT) > 0) {
         print("Initiating WET API puller. This may take a moment depending on network connection...")
         wet_data_raw <- map2(site_start_DT$site, site_start_DT$max_cached_DT,
@@ -94,48 +99,153 @@ server <- function(input, output, session) {
                            )
                          }) %>%
           rbindlist()
-        
+
         print(paste("WET API pull returned", nrow(wet_data_raw), "raw rows."))
         print("Cleaning WET data (removing invalid values and NAs)...")
-        
+
         wet_data <- wet_data_raw %>%
           filter(value %nin% invalid_values, !is.na(value)) %>%
           split(f = list(.$site, .$parameter), sep = "-")
-          
+
         print("WET data cleaning and splitting complete.")
       } else {
         print("No WET sites identified. Skipping pull.")
         wet_data <- list()
       }
-      
+
       home_state$set_status("wet_api", "done")
-      
+
       #### ---- HYDROVU & CONTRAIL API PULLS (MOCKED FOR NOW) ---- ####
-      # As requested, focusing only on WET dataset workflow first.
-      print("Skipping HydroVu and Contrail pulls for now (Mocking as done)...")
+      home_state$set_status("hydrovu_api", "loading")
+      hv_site <- c("pbd")
+
+      # Grab Sys.time()
+      t <- Sys.time()
+
+      # Make the start/end time in UTC
+      utc_start_DT <- with_tz(filter(max_dts, site %in% hv_site) %>% pull(max_DT) , "UTC")
+      utc_end_DT <- lubridate::with_tz(t, "UTC")
+
+      print(paste("Target HV sites identified:", paste(hv_site, collapse = ", ")))
+
+      if(length(utc_start_DT) > 0) {
+        print("Initiating HV API puller. This may take a moment depending on network connection...")
+        staging_directory = tempdir()
+        client_creds <- read_yaml("creds/HydroVuCreds.yml")
+        # Read in credentials from environment variables (GitHub Secrets)
+        client_id <- client_creds$client
+        client_secret <- client_creds$secret
+        # Check if credentials are available
+        if(client_id == "" || client_secret == "") {
+          stop("HydroVu credentials not found. Please check GitHub Secrets.")
+        } else {
+          message(paste("....Collation Step Update:", "HydroVu secrets retrieved"))
+        }
+
+        hv_token <- tryCatch({
+          hv_auth(client_id = client_id, client_secret = client_secret)
+        }, error = function(e) {
+          message("HydroVu authentication failed: ", e$message)
+          return(NULL)
+        })
+
+        if(is.null(hv_token)) {
+          stop("Could not authenticate with HydroVu API. Check credentials and API status.")
+        }
+
+        # Pulling in the data from hydrovu
+        hv_sites <- hv_locations_all(hv_token) %>%
+          filter(grepl("pbd", name, ignore.case = TRUE))%>%
+          filter(!grepl("2023|2024", name, ignore.case = TRUE))%>%
+          filter(!grepl("Vulink", name, ignore.case = TRUE))
+
+        message(paste("....Collation Step Update:", "Attempting to pull data from HydroVu API"))
+        walk(hv_site,
+             function(site) {
+               message("Requesting HV data for: ", hv_site)
+               ross.wq.tools::api_puller(
+                 site = hv_site,
+                 start_dt = utc_start_DT,
+                 end_dt = utc_end_DT,
+                 api_token = hv_token,
+                 hv_sites_arg = hv_sites,
+                 dump_dir = staging_directory
+               )
+             }
+        )
+
+        hv_data <- ross.wq.tools::munge_api_data(api_dir = staging_directory) %>%
+          distinct(.keep_all = TRUE)%>%
+          split(f = list(.$site, .$parameter), sep = "-") %>%
+          keep(~nrow(.) > 0)
+
+        print(paste("HV API pull returned", nrow(hv_data$`pbd-Temperature`), "raw rows."))
+        print("Cleaning HV data (removing invalid values and NAs)...")
+      } else {
+        print("No HV sites identified. Skipping pull.")
+        hv_data <- list()
+      }
+
       home_state$set_status("hydrovu_api", "done")
+      #### ---- CONTRAIL API PULL ---- ####
+      home_state$set_status("contrail_api", "loading")
+      incProgress(0.1, detail = "Retrieving Contrail data...")
+
+      contrail_sites <- c( "pman_fc", "pbr_fc")
+
+      denver_contrail_start_DT <- filter(max_dts, site %in% contrail_sites) %>%
+        mutate(max_cached_DT = with_tz(max_DT, "America/Denver"))%>%
+        #grab the oldest one
+        slice_min(order_by = max_cached_DT)%>%
+        pull(max_cached_DT)
+      denver_contrail_end_DT <- with_tz(utc_end_DT, tz = "America/Denver")
+
+      print("Pulling Contrail data...")
+
+      contrail_creds <- read_yaml("creds/ContrailCreds.yml")
+      if(contrail_creds$username == "" || contrail_creds$password == "" || contrail_creds$login_url == "") {
+        message("Contrail credentials not found. ")
+       contrail_data <- list()
+      } else {
+        message(paste("....Collation Step Update:", "Contrail credentials retrieved"))
+
+        contrail_data <- tryCatch(
+          {
+            pull_contrail_api(
+              start_DT = denver_contrail_start_DT,
+              end_DT = denver_contrail_end_DT,
+              username = contrail_creds$username,
+              password = contrail_creds$password,
+              login_url = contrail_creds$login_url
+            )
+          },
+          error = function(e) {
+            message("Contrail API pull failed: ", conditionMessage(e))
+            list()
+          }
+        )
+      }
+
       home_state$set_status("contrail_api", "done")
-      hv_data <- list()
-      contrail_data <- list()
-      
+
       #### ---- CDWR FLOW API PULL ---- ####
       home_state$set_status("cdwr_flow_api", "loading")
       incProgress(0.15, detail = "Retrieving CDWR flow sites data...")
       print("Pulling CDWR flow data for map/flow charts...")
-      
+
       tryCatch({
         sites <- read_csv(file = "data/cdwr_sites_oi.csv", show_col_types = F)
-        
+
         if (nrow(sites) > 0) {
           end_date <- as.character(Sys.Date() + days(1))
           start_date <- as.character(Sys.Date() - days(7))
-          
+
           flow_sites_res <- sites %>%
             split(1:nrow(.)) %>%
             map_dfr(function(site_row) {
               site_id <- site_row$abbrev
               param_code <- site_row$parameter
-              
+
               make_empty_row <- function(msg = "No Data") {
                 site_row %>%
                   as_tibble() %>%
@@ -148,7 +258,7 @@ server <- function(input, output, session) {
                   select(abbrev, station_name, data_source, water_source, gnis_id, latitude, longitude,
                          current_flow_cfs, flow_slope, trend, structure_type, site_type = station_type, nested_data)
               }
-              
+
               result <- tryCatch({
                 flow_data <- get_telemetry_ts(
                   abbrev = site_id,
@@ -162,22 +272,22 @@ server <- function(input, output, session) {
                   group_by(DT_round) %>%
                   summarise(flow = mean(meas_value, na.rm = TRUE), .groups = "drop") %>%
                   mutate(abbrev = site_id)
-                
+
                 if (nrow(flow_data) == 0) return(make_empty_row("No Records"))
-                
+
                 end_time <- Sys.time()
                 start_time_24h <- end_time - hours(24)
                 iv_data <- flow_data %>% filter(DT_round >= start_time_24h & DT_round <= end_time)
-                
+
                 if (nrow(iv_data) >= 2) {
                   flow_model <- lm(flow ~ DT_round, data = iv_data)
                   slope <- coef(flow_model)[2]
-                  
+
                   current_flow <- iv_data %>%
                     arrange(DT_round) %>%
                     slice_tail(n = 1) %>%
                     pull(flow)
-                  
+
                   site_row %>%
                     as_tibble() %>%
                     mutate(
@@ -195,10 +305,10 @@ server <- function(input, output, session) {
               }, error = function(e) {
                 make_empty_row("API Error/No Records")
               })
-              
+
               return(result)
             })
-            
+
             values$flow_sites <- flow_sites_res
             print(paste("CDWR flow data pulled successfully for", nrow(flow_sites_res), "sites."))
         }
@@ -206,7 +316,7 @@ server <- function(input, output, session) {
         print(paste("CDWR Error:", e$message))
       })
       home_state$set_status("cdwr_flow_api", "done")
-      
+
       #### ---- SNOTEL API PULL ---- ####
       home_state$set_status("snotel_api", "loading")
       incProgress(0.1, detail = "Retrieving SNOTEL snowpack data...")
@@ -229,7 +339,7 @@ server <- function(input, output, session) {
         # Find min and max date from cached data for the historical pull
         min_date <- as.Date(min(cached_data$DT_round, na.rm = TRUE)) - days(1)
         max_date <- as.Date(max(cached_data$DT_round, na.rm = TRUE)) + days(1)
-        
+
         canyon_q_res <- cdssr::get_telemetry_ts(
           abbrev = "CLAFTCCO",
           start_date = min_date,
@@ -237,9 +347,9 @@ server <- function(input, output, session) {
           api_key = cdwr_api_key,
           timescale = "hour"
         ) %>%
-          mutate(date = as_date(datetime, tz = "America/Denver")) %>%
+          mutate(date = as.Date(force_tz(datetime, tz = "America/Denver")) )%>%
           summarize(canyon_mouth_daily_flow_cfs = mean(meas_value, na.rm = TRUE), .by = date)
-        
+
         values$canyon_q <- canyon_q_res
         print("Historical flow pulled successfully.")
       }, error = function(e) {
@@ -254,20 +364,20 @@ server <- function(input, output, session) {
       list_names <- names(all_data_raw)
       keep_indices <- !grepl("stage", list_names, ignore.case = TRUE)
       all_data_raw <- all_data_raw[keep_indices]
-      
+
       if(length(all_data_raw) == 0){
         print("Warning: No new API data found.")
         combined_data <- data.frame()
       } else {
         print("Tidying API data...")
         tidy_data <- all_data_raw %>%
-          map(~tidy_api_data(api_data = .)) %>%  
+          map(~tidy_api_data(api_data = .)) %>%
           keep(~!is.null(.))
 
         print("Pulling field notes from mWater...")
         mWater_creds <- read_yaml("creds/mWaterCreds.yml")
         mWater_data <- load_mWater(creds = mWater_creds)
-        
+
         all_field_notes <- grab_mWater_sensor_notes(mWater_api_data = mWater_data) %>%
           mutate(DT_round = with_tz(DT_round, tzone = "UTC"),
                  last_site_visit = with_tz(last_site_visit, tzone = "UTC"),
@@ -287,7 +397,7 @@ server <- function(input, output, session) {
 
       incProgress(0.1, detail = "Structuring and deduplicating dataset...")
       print("Merging new data with cached data and deduplicating...")
-      
+
       if(nrow(combined_data) > 0) {
         dashboard_data <- bind_rows(cached_data, combined_data) %>%
           arrange(site, parameter, DT_round) %>%
@@ -299,11 +409,11 @@ server <- function(input, output, session) {
           distinct(site, parameter, DT_round, .keep_all = TRUE) %>%
           ungroup()
       }
-      
+
       print("--- DATA INITIALIZATION COMPLETE ---")
-      Sys.sleep(0.5) 
+      Sys.sleep(0.5)
       incProgress(0.1, detail = "Data successfully loaded!")
-      
+
       # Finalize Initialization
       loaded_data(dashboard_data)
       home_state$set_status("all_done", TRUE)
@@ -559,15 +669,17 @@ server <- function(input, output, session) {
 
       return(p)
     }
+
     # Apply TOC model on relevant data
     toc_plot_data <- apply_toc_model(sensor_data = input_data,
                                      #toc_model_file_path = "data/models/ross_only_toc_xgboost_models_light_20260224.rds",
-                                     scaling_params_file_path = "data/models/scaling_params_toc_20260224.parquet",
+                                     scaling_params_file_path = "data/models/scaling_params_toc_20260518.parquet",
                                      #summarizing model input results to user selected timestep (15 min -> 1 day)
                                      summarize_interval = input$data_timestep,
                                      time_col = "DT_round",
                                      value_col = "mean",
-                                     canyon_q_data = values$canyon_q) %>%
+                                     canyon_q_data = values$canyon_q,
+                                     timeseries = T) %>%
       left_join(site_table, by = c("site" = "site_code"))%>%
       mutate(across(contains("TOC_guess"), ~ round(.x, 2)))
     #parameter to plot
@@ -590,16 +702,17 @@ server <- function(input, output, session) {
         site_toc_data <- toc_plot_data %>%
           filter(site_name == site_cd)%>%
           arrange(DT_round) %>%
+          #pad data to ensure continuous time series (important for ribbon plotting)
+          complete(DT_round = seq(min(DT_round), max(DT_round), by = input$data_timestep))%>%
           mutate(
             gap = is.na(TOC_guess_min) | is.na(TOC_guess_max) | is.na(.data[[plot_param]]),
             gid = cumsum(lag(gap, default = TRUE) != gap)
-          ) %>%
-          filter(!gap)
+          )
 
         if (nrow(site_toc_data) == 0) {
           # Return empty plot safely if no data
           return(
-            plot_ly() %>% 
+            plot_ly() %>%
               add_text(x = 0.5, y = 0.5, text = "No TOC data available for this date range.",
                        textfont = list(size = 16, color = "red"),
                        showlegend = FALSE) %>%
@@ -719,10 +832,10 @@ server <- function(input, output, session) {
           if (nrow(site_samples) > 0) {
             all_vals <- c(all_vals, site_samples$TOC)
           }
-          
+
           data_min <- suppressWarnings(min(all_vals, na.rm = TRUE))
           data_max <- suppressWarnings(max(all_vals, na.rm = TRUE))
-          
+
           if (is.infinite(data_min)) data_min <- param_bounds$lower
           if (is.infinite(data_max)) data_max <- param_bounds$upper
 
@@ -1046,7 +1159,7 @@ server <- function(input, output, session) {
       card(
         card_header("Flows Historical Stats"),
         #TODO: change this to Dropdown from available sites
-        pickerInput("site_abbrev_selected",
+        pickerInput("site_title_selected",
                     label = "Select Site to View Historical Conditions:",
                     choices = cdwr_lookup_table$site_title,
                     selected = c("Canyon Mouth")
@@ -1269,7 +1382,6 @@ server <- function(input, output, session) {
 
 
   output$clp_rainbow_plot <- renderPlotly({
-
 
     site_abbrev <- cdwr_lookup_table%>%
       filter(site_title == input$site_title_selected)%>%
