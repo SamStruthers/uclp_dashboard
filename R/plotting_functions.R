@@ -8,7 +8,7 @@ plot_toc_forecast <- function(forecast_data, title_suffix = "") {
   col_orange <- 'rgba(255, 165, 0, 0.2)'
   col_green  <- 'rgba(0, 255, 0, 0.2)'
   col_blue   <- 'rgba(0, 0, 255, 0.2)'
-  
+
   # Reference lines
   ref_lines <- c(2, 4, 8)
   hline_shapes <- lapply(ref_lines, function(y_val) {
@@ -17,16 +17,16 @@ plot_toc_forecast <- function(forecast_data, title_suffix = "") {
       line = list(color = "rgba(0, 0, 0, 0.4)", width = 1.5, dash = "dash")
     )
   })
-  
+
   # Extract creation date
-  forecast_date <- if("date" %in% names(forecast_data)) unique(forecast_data$date)[1] else "Unknown"
-  
+  forecast_date <- if("date" %in% names(forecast_data)) unique(forecast_data$date)[1] + days(1) else "Unknown"
+
   # Identify column names (Intake vs Distributed)
   # Intake uses: intake_q_swe_pred_min, etc.
   # Distributed uses: dist_min_pred_toc, etc.
-  
+
   is_intake <- "intake_q_swe_pred" %in% names(forecast_data)
-  
+
   if (is_intake) {
     y_col <- "intake_q_swe_pred"
     y_min <- "intake_q_swe_pred_min"
@@ -42,7 +42,7 @@ plot_toc_forecast <- function(forecast_data, title_suffix = "") {
     y_max <- "dist_max_pred_toc"
     hover_label <- "Mean Prediction"
   }
-  
+
   p <- plot_ly(forecast_data, x = ~date_24h) %>%
     add_ribbons(ymin = as.formula(paste0("~", y_q75)), ymax = as.formula(paste0("~", y_max)),
                 fillcolor = col_red, line = list(color = 'transparent'),
@@ -86,6 +86,6 @@ plot_toc_forecast <- function(forecast_data, title_suffix = "") {
       margin = list(t = 50, b = 30, l = 50, r = 20)
     ) %>%
     config(displayModeBar = FALSE)
-  
+
   return(p)
 }
