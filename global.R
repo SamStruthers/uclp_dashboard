@@ -5,8 +5,8 @@
 # Remove the custom package_loader function and install.packages() calls
 
 # Simply load required packages - shinyapps.io will automatically detect and install them
-## commiting out libraries that are not used 
-## remove here, scales, and glue as there were not called oftem and easily replaced. 
+## commiting out libraries that are not used
+## remove here, scales, and glue as there were not called oftem and easily replaced.
 suppressMessages({
   #library(furrr)
   library(ross.wq.tools)
@@ -36,10 +36,10 @@ suppressMessages({
   library(cdssr)
   library(yaml)
   # Development tools
-  library(devtools) # this might be needed as ross.wq and cddsr are not on cran 
+  library(devtools) # this might be needed as ross.wq and cddsr are not on cran
   # Shiny
   library(shiny)
-  library(shinymanager) # maybe? 
+  library(shinymanager) # maybe?
   library(shinycssloaders)
   # library(shinyTime)
   library(bslib)
@@ -49,6 +49,7 @@ suppressMessages({
   library(readr)
   # Core data manipulation
   library(tidyverse)
+  library(glue)
   library(DT)
   library(purrr)
   library(data.table)
@@ -125,6 +126,6 @@ toc_forecast_sites <- read_csv("data/toc_forecast_location_metadata.csv", show_c
 
 # Load TOC real-time model ensemble
 toc_realtime_model <- map(1:3, ~xgb.load(
-  modelfile = paste0("data/models/ross_only_toc_xgboost_model_fold", .x, "_20260224.ubj")
+  modelfile = paste0("data/models/ross_only_toc_xgboost_model_fold", .x, "_20260518.ubj")
 ))
 
