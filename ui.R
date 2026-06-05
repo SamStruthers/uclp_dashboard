@@ -1,7 +1,7 @@
 #UI
 
 #### Start UI ####
-ui <- # secure_app( #wrap in secure_app for authentication with shiny_manager. Undo hash to enable, see `setup` folder for credentials and contact Sam Struthers for usernames/passwords
+ui <-  secure_app( #wrap in secure_app for authentication with shiny_manager. Undo hash to enable, see `setup` folder for credentials and contact Sam Struthers for usernames/passwords
   dashboardPage(
     dashboardHeader(title = "Water Quality Monitoring Dashboard"),
     #### Define Sidebar ####
@@ -65,11 +65,11 @@ ui <- # secure_app( #wrap in secure_app for authentication with shiny_manager. U
           line-height: 30px !important;
         }
       ")),
-      
+
       tabItems(
         #### Home Tab ####
         home_ui("home"),
-        
+
         #### Sensor Data Tab ####
         tabItem(tabName = "sensor_data",
                 fluidRow(
@@ -181,7 +181,7 @@ ui <- # secure_app( #wrap in secure_app for authentication with shiny_manager. U
 
                     # Add descriptive text below the title
                     tags$p(
-                      "These are preliminary model results. Model Ensemble line represents the mean of four separate models while the range represents the maximum and minimum estimates across models. Data gaps represent data removed due to QAQC process or due to data transmission errors.  Historical grab sampling values for comparison are available from 4/1/25-7/1/25, please change the date range above to view.",
+                      "These are preliminary model results. Model Ensemble line represents the mean of four separate models while the range represents the maximum and minimum estimates across models. Data gaps represent data removed due to QAQC process or due to data transmission errors.  Historical grab sampling values for comparison are available from 4/1/25-11/1/25, please change the date range above to view.",
                       style = "margin-bottom: 16px; font-weight: bold; font-style; normal;"
                     ),
 
@@ -241,7 +241,7 @@ ui <- # secure_app( #wrap in secure_app for authentication with shiny_manager. U
                   col_widths = c(7, 5),
                   # 3-day Q plot card
                   card(
-                    card_header("Current flows (7 days) for key CLP sites"),
+                    card_header("Current flows (7 days) for Key CLP sites"),
                     card_body(
                       plotlyOutput("seven_day_q_plot")
                     )
@@ -264,5 +264,5 @@ ui <- # secure_app( #wrap in secure_app for authentication with shiny_manager. U
       )
     )
   )
-# ) #UNDO HASH TO ENABLE SHINY MANAGER AUTHENTICATION, SEE `setup` folder for credentials and contact Sam Struthers for usernames/passwords
+   ) #UNDO HASH TO ENABLE SHINY MANAGER AUTHENTICATION, SEE `setup` folder for credentials and contact Sam Struthers for usernames/passwords
 #### End of UI ####
