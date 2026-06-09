@@ -42,7 +42,7 @@ jobs:
             any::xml2
             any::groupdata2
             any::slider
-            github::ROSSyndicate/ross.wq.tools
+            github::ROSSyndicate/ross.wq.tools@uclp_dashboard_static
       # === DATA COLLATION PHASE ===
       - name: Collate Data
         working-directory: ./  # Ensure we're in the repo root

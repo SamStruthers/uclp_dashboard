@@ -180,19 +180,31 @@ hv_data <- hv_data <- ross.wq.tools::munge_api_data(api_dir = staging_directory)
 message(paste("....Collation Step Update:", "successfully pulled and munged HydroVu API data"))
 
 ## Contrail Data ----
+message(paste("Collation Step:", "getting Contrail API data"))
+
 source(file = here("R", "pull_contrail_api.R"))
 
 contrail_un <- Sys.getenv("CONTRAIL_CLIENT_ID")
 contrail_pw <- Sys.getenv("CONTRAIL_CLIENT_SECRET")
 contrail_url <- Sys.getenv("CONTRAIL_CLIENT_URL")
 
-contrail_data <- pull_contrail_api(
-  start_DT = denver_start_DT,
-  end_DT = denver_end_DT,
-  username = contrail_un,
-  password = contrail_pw,
-  login_url = contrail_url
-  )
+#Attempt to pull contrail data, if this fails return empty list and log the error message
+contrail_data <- tryCatch(
+  {
+    pull_contrail_api(
+      start_DT = denver_start_DT,
+      end_DT = denver_end_DT,
+      username = contrail_un,
+      password = contrail_pw,
+      login_url = contrail_url
+    )
+  },
+  error = function(e) {
+    message("Contrail API pull failed: ", conditionMessage(e))
+    list()
+  }
+)
+
 
 # Collating Datasets ----
 # Add previous 26 hours of data to flag properly

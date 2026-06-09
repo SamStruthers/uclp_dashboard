@@ -85,10 +85,10 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
   processed_sensor_data <- sensor_data %>%
     select(!!sym(time_col), !!sym(site_col), !!sym(parameter_col), !!sym(value_col)) %>%
     distinct()%>%
-    mutate(!!sym(value_col) := case_when( !!sym(parameter_col) == "Turbidity" & !!sym(value_col) < 0.1 ~ 0.1,
-                                          !!sym(parameter_col) == "Turbidity" & !!sym(value_col) > 1000 ~ 1000,
-                                          TRUE ~ !!sym(value_col)))%>%
     pivot_wider(names_from = !!sym(parameter_col), values_from = !!sym(value_col))%>%
+    mutate(Turbidity = case_when( Turbidity < 0.1 ~ 0.1,
+                                          Turbidity > 1000 ~ 1000,
+                                          TRUE ~ Turbidity ))%>%
     apply_fdom_corrections(fdom_col = "FDOM Fluorescence", temp_col = "Temperature", turb_col = "Turbidity",
                            fdom_temp_col = "FDOMc", fdom_turb_col = "FDOM_turb_corr", fdom_final_col = "FDOM_final_corr")%>%
     mutate(fdom_x_sc = FDOMc * `Specific Conductivity`,
@@ -116,7 +116,7 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
                                           end_date = end_date_req + days(1),
                                           api_key = cdwr_api_key,
                                         timescale = "hour") %>%
-      mutate(date = as_date(datetime, tz = "America/Denver")) %>%
+      mutate(date = as.Date(force_tz(datetime, tz = "America/Denver")))%>%
       summarize(canyon_mouth_daily_flow_cfs = mean(meas_value, na.rm = TRUE), .by = date)
     }, error = function(e) {
       warning("Failed to pull canyon_q_data: ", e$message)
@@ -139,41 +139,38 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
 
   #Apply scaling normalization and convert to matrix
   summarized_data <- model_input_data %>%
+    select(-any_of(c("date"))) %>% # remove date if present, since it's not a feature
     apply_training_scale(new_data = ., scaling_params = scaling_params,features = features) %>%
     mutate( !!sym(time_col) := round_date(!!sym(time_col), unit = summarize_interval))%>%
-    #summarize to the specified interval
-    summarize(across(any_of(c(features)), \(x) median(x, na.rm = TRUE)),.by = c(!!sym(site_col), !!sym(time_col)))
+    group_by(!!sym(site_col), !!sym(time_col)) %>%
+    summarise(across(everything(), mean, na.rm = TRUE), .groups = 'drop')
 
   target_col = "TOC"
 
-  # Try XGBoost first, if it fails due to corruption, fallback to GAM
-  xgb_failed <- FALSE
-
   #Using each model, make a prediction on the da
-  predictions_list <- tryCatch({
+  predictions_df <- tryCatch({
     imap_dfc(toc_models, ~{
+      features_fold <- xgb.importance(model = .x) %>% pull(Feature)
+      best_iter <- as.numeric(xgb.attr(.x, "best_iteration"))
+
       feature_data <- summarized_data %>%
-        select(all_of(features)) %>%
+        select(all_of(features_fold)) %>%
         mutate(across(everything(), as.numeric))
 
-      #Check for missing values in features
+      # Check for missing values in features
       has_na <- rowSums(is.na(feature_data)) > 0
 
-      # Make preds using a single model
-      # Note: accessing .x fields might throw if booster is corrupted
-      best_iter <- 1
-      try({ best_iter <- xgb.attr(.x, "best_iteration")%>%as.numeric() }, silent = TRUE)
-
+      # Make predictions
       raw_preds <- feature_data %>%
-          as.matrix()%>%
-          predict(.x, ., iteration_range = c(1, best_iter), validate_parameters = T) %>%
-          round(2)
+        as.matrix() %>%
+        predict(.x, ., iteration_range = c(1, best_iter), validate_features = TRUE) %>%
+        round(2)
 
-      # make preds NA where features had NA
+      # Make predictions NA where features had NA
       final_preds <- if_else(has_na, NA_real_, raw_preds)
 
-      # Get predictions as tibble
-      tibble(!!paste0(target_col, "_guess_fold", .y) := final_preds)
+      # Return predictions as tibble
+      tibble(!!glue("{target_col}_guess_fold{.y}") := final_preds)
     })
   }, error = function(e) {
     warning("XGBoost prediction failed (possibly corrupted models): ", e$message)
@@ -181,18 +178,18 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
     return(NULL)
   })
 
-  summarized_data <- bind_cols(summarized_data, predictions_list) %>%
-    # compute ensemble mean
+  summarized_data <- summarized_data %>%
+    bind_cols(predictions_df) %>%
     mutate(
-      !!paste0(target_col, "_guess_ensemble") := if_else(
-        if_any(all_of(features), is.na) & !xgb_failed,                # Check if ANY feature is NA (only for XGB)
-        NA_real_,                                                        # If true, set ensemble to NA
-        round(rowMeans(across(matches(paste0(target_col, "_guess_fold")))), 2) # Else, compute mean
+      !!glue("{target_col}_guess_ensemble") := if_else(
+        if_any(all_of(features), is.na),
+        NA_real_,
+        round(rowMeans(across(matches(glue("{target_col}_guess_fold")))), 2)
       )
     )
 
   # Columns with fold predictions
-  fold_cols <- grep(paste0(target_col, "_guess_fold"), colnames(summarized_data), value = TRUE)
+  fold_cols <- grep(glue("{target_col}_guess_fold"), colnames(summarized_data), value = TRUE)
 
   if (nrow(summarized_data) == 0) {
     # Provide an empty dataset with the expected structure
@@ -206,6 +203,7 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
   }
 
   if(timeseries){
+
     start_DT <- min(sensor_data[[time_col]], na.rm = TRUE)
     end_DT <- max(sensor_data[[time_col]], na.rm = TRUE)
 
@@ -222,17 +220,18 @@ apply_toc_model <- function(sensor_data, toc_models = toc_realtime_model, scalin
       ) %>%
       # Compute min/max across folds
       mutate(
-        !!paste0(target_col, "_guess_min") := pmin(!!!syms(fold_cols), na.rm = TRUE),
-        !!paste0(target_col, "_guess_max") := pmax(!!!syms(fold_cols), na.rm = TRUE),
-        !!paste0(target_col, "_guess_ensemble") := pmax(0, !!sym(paste0(target_col, "_guess_ensemble")))#,
+        !!glue("{target_col}_guess_min") := pmin(!!!syms(fold_cols), na.rm = TRUE),
+        !!glue("{target_col}_guess_max") := pmax(!!!syms(fold_cols), na.rm = TRUE),
+        !!glue("{target_col}_guess_ensemble") := pmax(0, !!sym(glue("{target_col}_guess_ensemble")))
         # group = with(rle(!is.na(.data[[paste0(target_col, "_guess_ensemble")]])), rep(seq_along(values), lengths))
       )
   } else {
     final_dataset <- summarized_data %>%
+      # Compute min/max across folds
       mutate(
-        !!paste0(target_col, "_guess_min") := pmin(!!!syms(fold_cols), na.rm = TRUE),
-        !!paste0(target_col, "_guess_max") := pmax(!!!syms(fold_cols), na.rm = TRUE),
-        !!paste0(target_col, "_guess_ensemble") := pmax(0, !!sym(paste0(target_col, "_guess_ensemble")))
+        !!glue("{target_col}_guess_min") := pmin(!!!syms(fold_cols), na.rm = TRUE),
+        !!glue("{target_col}_guess_max") := pmax(!!!syms(fold_cols), na.rm = TRUE),
+        !!glue("{target_col}_guess_ensemble") := pmax(0, !!sym(glue("{target_col}_guess_ensemble")))
       )
   }
 

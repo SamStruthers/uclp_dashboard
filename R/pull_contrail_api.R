@@ -94,7 +94,9 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
 
   # Get the login page and extract CSRF token
   login_page_req <- request(contrail_login_url) |>
-    req_cookie_preserve(session_file)
+    req_cookie_preserve(session_file)|>
+    req_timeout(15) |>                 # Increase timeout to 15 seconds
+    req_retry(max_tries = 2, backoff = ~ 5) # Allow for a second attempt after waiting ~ 5s
 
   login_page_resp <- req_perform(login_page_req)
 
@@ -114,7 +116,9 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
       login = "login",
       continue = continue_key,  # from end of url
       csrf_token = csrf_token
-    )
+    )|>
+    req_timeout(15) |>                 # Increase timeout to 15 seconds
+    req_retry(max_tries = 2, backoff = ~ 5) # Allow for a second attempt after waiting ~ 5s
 
   login_resp <- req_perform(login_req)
 
@@ -210,7 +214,7 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
         "&mode=&hours=&data_start=", start_DT_encoded,
         "&data_end=", end_DT_encoded,
         "&tz=US%2FMountain&format_datetime=%25Y-%25m-%25d+%25H%3A%25i%3A%25S&mime=txt&delimiter=comma"
-      )
+      )[1]
 
       tryCatch({
         #request download from encoded url

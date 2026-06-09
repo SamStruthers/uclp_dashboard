@@ -3,7 +3,7 @@
 #### Home Module UI ####
 home_ui <- function(id) {
   ns <- NS(id)
-  
+
   tabItem(tabName = "home",
           shinyjs::useShinyjs(),
           tags$head(
@@ -45,23 +45,23 @@ home_ui <- function(id) {
               }
             ")))
           ),
-          
+
           div(id = ns("home_map_container"),
               leafletOutput(ns("home_map"), height = "100%", width = "100%"),
-              
+
               # Top Left Control Panel
               div(class = "map-overlay",
                   h3("System Controls", style = "margin-top: 0;"),
-                  
+
                   # Parameter Selector
                   pickerInput(ns("map_param"), "Visualize Parameter:",
-                              choices = c("FDOM Fluorescence", "Temperature", "Turbidity", "pH", "DO", 
+                              choices = c("FDOM Fluorescence", "Temperature", "Turbidity", "pH", "DO",
                                           "Specific Conductivity", "Chl-a Fluorescence", "Depth", "Estimated TOC"),
                               selected = "Turbidity",
                               options = list(`style` = "btn-primary")),
-                  
+
                   hr(),
-                  
+
                   # Initialization Control
                   p(tags$small("The map shows the latest available snapshot. Initialize full data streams for historical trends.")),
                   actionBttn(ns("start_sync"), "Initialize Data", style = "jelly", color = "primary", icon = icon("download"), size = "sm"),
@@ -69,7 +69,7 @@ home_ui <- function(id) {
                   uiOutput(ns("sync_checklist"))
               )
           ),
-          
+
           div(id = ns("home_plot_container"),
               h4("Fort Collins Intake Total Organic Carbon (TOC) Forecast", style = "margin-top: 0; margin-bottom: 10px; text-align: center; flex: 0 0 auto;"),
               div(style = "flex: 1 1 auto; min-height: 0;",
@@ -80,17 +80,19 @@ home_ui <- function(id) {
 }
 
 #### Home Module Server ####
-home_server <- function(id, loaded_data) {
+home_server <- function(id, loaded_data, auth) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    
+
     # 0. Load Snapshot immediately for the map
     snapshot_data <- reactiveVal(NULL)
     distributed_toc_data <- reactiveVal(NULL)
     intake_forecast_data <- reactiveVal(NULL)
-    
+
     # Load initial snapshot (fastest path to map)
     observe({
+    req(is.character(auth$user) )
+
       tryCatch({
         df <- arrow::read_parquet(snapshot_url, as_data_frame = TRUE)
         latest_snapshot <- df %>%
@@ -106,7 +108,7 @@ home_server <- function(id, loaded_data) {
     # Sequence remaining data pulls AFTER map is visualized
     observeEvent(input$home_map_zoom, {
       req(input$home_map_zoom)
-      
+
       # 1. Pull Distributed TOC for the map markers (the "Estimated TOC" overlay)
       later::later(function() {
         try({
@@ -123,7 +125,7 @@ home_server <- function(id, loaded_data) {
         }, silent = TRUE)
       }, 1.5)
     }, once = TRUE)
-    
+
     # 1. Track sync status
     sync_status <- reactiveValues(
       cached_data = "done",
@@ -134,34 +136,34 @@ home_server <- function(id, loaded_data) {
       snotel_api = "pending",
       all_done = FALSE
     )
-    
+
     # Real-time TOC Estimate (Model-based) for the map
     realtime_toc_snapshot <- reactive({
       req(snapshot_data())
-      
+
       # We need FDOM, Temp, SC, Turbidity, Chl-a for the model
       # Sites pman_fc and pbr_fc do not have FDOM
       sensor_snapshot <- snapshot_data() %>%
         filter(site %nin% c("pman_fc", "pbr_fc"))
-      
+
       # Check if we have enough parameters to even try
       params <- unique(sensor_snapshot$parameter)
       required <- c("FDOM Fluorescence", "Temperature", "Specific Conductivity", "Turbidity")
-      
+
       if (!all(required %in% params)) return(NULL)
-      
+
       tryCatch({
         # Run the model on the snapshot
-        # We need canyon_q which might not be loaded yet in the main server, 
+        # We need canyon_q which might not be loaded yet in the main server,
         # but apply_toc_model has a fallback to pull it if NULL.
         res <- apply_toc_model(
           sensor_data = sensor_snapshot,
-          scaling_params_file_path = "data/models/scaling_params_toc_20260224.parquet",
+          scaling_params_file_path = "data/models/scaling_params_toc_20260518.parquet",
           summarize_interval = "15 mins", # Match the choices in the ui
           time_col = "DT_round",
           value_col = "mean"
         )
-        
+
         if (nrow(res) > 0) {
           res %>%
             select(site, DT_round, mean = TOC_guess_ensemble) %>%
@@ -182,14 +184,14 @@ home_server <- function(id, loaded_data) {
         NULL
       })
     })
-    
+
     output$sync_checklist <- renderUI({
       get_icon <- function(status) {
         if (status == "pending") return(icon("circle", class = "text-muted"))
         if (status == "loading") return(icon("spinner", class = "fa-spin text-primary"))
         if (status == "done") return(icon("check-circle", class = "text-success"))
       }
-      
+
       tagList(
         tags$div(style = "font-size: 0.9em;",
           p(get_icon(sync_status$cached_data), " Snapshot Data Loaded"),
@@ -201,7 +203,7 @@ home_server <- function(id, loaded_data) {
         )
       )
     })
-    
+
     # Render Home Map (Static Base Only)
     output$home_map <- renderLeaflet({
       leaflet(options = leafletOptions(minZoom = 8, maxZoom = 15)) %>%
@@ -220,15 +222,15 @@ home_server <- function(id, loaded_data) {
     # Update Home Map Markers and Controls via Proxy
     observe({
       target_param <- input$map_param
-      
+
       data_to_use <- if (!is.null(loaded_data()) && nrow(loaded_data()) > 0) {
         loaded_data()
       } else {
         snapshot_data()
       }
-      
+
       req(data_to_use, nrow(data_to_use) > 0)
-      
+
       latest_readings <- data_to_use %>%
         apply_cleaning_filters() %>%
         mutate(DT_round_MT = with_tz(DT_round, tzone = "America/Denver")) %>%
@@ -250,27 +252,27 @@ home_server <- function(id, loaded_data) {
         select(site, parameter, mean, units) %>%
         mutate(display_val = paste0(round(mean, 2), " ", units)) %>%
         select(-mean, -units) %>%
-        pivot_wider(names_from = parameter, values_from = display_val) 
-      
+        pivot_wider(names_from = parameter, values_from = display_val)
+
       site_latest_times <- latest_readings %>%
         group_by(site) %>%
         summarise(DT_round_MT = max(DT_round_MT, na.rm = TRUE), .groups = "drop")
-      
+
       target_numeric <- latest_readings %>%
         filter(parameter == target_param) %>%
         select(site, numeric_val = mean)
-      
+
       # Use sonde_locations from global.R
       map_data <- sonde_locations %>%
         inner_join(snapshot_wide, by = "site") %>%
         inner_join(site_latest_times, by = "site") %>%
         left_join(target_numeric, by = "site") %>%
         filter(!is.na(lat), !is.na(lon))
-      
-      expected_params <- c("Temperature", "pH", "Specific Conductivity", "DO", 
-                           "Turbidity", "FDOM Fluorescence", "Chl-a Fluorescence", 
+
+      expected_params <- c("Temperature", "pH", "Specific Conductivity", "DO",
+                           "Turbidity", "FDOM Fluorescence", "Chl-a Fluorescence",
                            "Depth", "Estimated TOC")
-      
+
       popup_content <- lapply(seq_len(nrow(map_data)), function(i) {
         row <- map_data[i, ]
         popup <- paste0(
@@ -282,10 +284,10 @@ home_server <- function(id, loaded_data) {
         for (param in expected_params) {
           val <- if (param %in% names(row)) row[[param]] else NA
           is_missing <- is.na(val) || val == "NA NA" || is.null(val) || val == "NA"
-          
+
           display_val <- if(is_missing) "<span style='color: #999; font-style: italic;'>No Data</span>" else val
           style <- if(param == target_param) "style='font-weight: bold; color: #E70870;'" else ""
-          
+
           popup <- paste0(popup, "<tr><td ", style, ">", param, "</td><td ", style, " align='right'>", display_val, "</td></tr>")
         }
         # Add a Link to Trends
@@ -310,7 +312,7 @@ home_server <- function(id, loaded_data) {
       } else {
         pal <- colorNumeric(palette = "viridis", domain = map_data$numeric_val, na.color = "#D3D3D3")
       }
-      
+
       leafletProxy("home_map") %>%
         clearMarkers() %>%
         clearControls() %>%
@@ -324,12 +326,12 @@ home_server <- function(id, loaded_data) {
         ) %>%
         addLegend(
           position = "bottomright", pal = pal,
-          values = map_data$numeric_val[!is.na(map_data$numeric_val)], 
+          values = map_data$numeric_val[!is.na(map_data$numeric_val)],
           title = paste(target_param), opacity = 1
         ) %>%
         addLegend(
-          position = "bottomright", 
-          colors = "#D3D3D3", 
+          position = "bottomright",
+          colors = "#D3D3D3",
           labels = "No Data",
           opacity = 1
         ) %>%
@@ -348,36 +350,36 @@ home_server <- function(id, loaded_data) {
         })
       }
     })
-    
+
     # Handle "View Trends" from popup
     observeEvent(input$view_trends, {
       req(input$view_trends)
-      
+
       # Switch to sensor data tab
       updateTabItems(session = session$userData$parent_session, "sidebar", "sensor_data")
-      
+
       # Map the site code back to the display name for the picker
       site_display_name <- site_table %>%
         filter(site_code == input$view_trends) %>%
         pull(site_name)
-      
+
       if (length(site_display_name) > 0) {
         updatePickerInput(session = session$userData$parent_session, "sites_select", selected = site_display_name)
       }
     })
-    
+
     # Render Intake TOC Forecast Plot
     output$intake_toc_forecast_plot <- renderPlotly({
       req(intake_forecast_data())
-      
+
       intake_cached_data <- intake_forecast_data() %>%
         filter(date == max(date, na.rm = TRUE)) %>% # Get the most recent forecast date
         mutate(across(contains("intake_q_swe_pred"), ~ round(.x, 2))) %>%
         filter(date_24h <= Sys.Date() + days(10)) #Limit to the next 10 days
-        
+
       plot_toc_forecast(intake_cached_data)
     })
-    
+
     return(list(
       start_sync = reactive({ input$start_sync }),
       set_status = function(step, status) { sync_status[[step]] <- status },
