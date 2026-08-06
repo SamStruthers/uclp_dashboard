@@ -149,6 +149,8 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
     # Get site page (contains all parameter links)
     resp <- request("https://contrail.fcgov.com/list/") |>
       req_cookie_preserve(session_file) |>
+      req_timeout(15) |>
+      req_retry(max_tries = 2, backoff = ~ 5) |>
       req_perform()
 
     page <- resp |> resp_body_html()
@@ -160,6 +162,8 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
     # move into site page
     site_resp <- request(full_url) |>
       req_cookie_preserve(session_file) |>
+      req_timeout(15) |>
+      req_retry(max_tries = 2, backoff = ~ 5) |>
       req_perform()
 
     site_page <- site_resp |> resp_body_html()
@@ -199,6 +203,8 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
       # Test param link
       site_param_page <- request(full_param_url) |>
         req_cookie_preserve(session_file) |>
+        req_timeout(15) |>
+        req_retry(max_tries = 2, backoff = ~ 5) |>
         req_perform()
       # Check if accessible
       if (resp_status(site_param_page) != 200) {
@@ -218,7 +224,10 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
 
       tryCatch({
         #request download from encoded url
-        download_req <- request(encoded_url) |> req_cookie_preserve(session_file)
+        download_req <- request(encoded_url) |>
+          req_cookie_preserve(session_file) |>
+          req_timeout(15) |>
+          req_retry(max_tries = 2, backoff = ~ 5)
         download_resp <- req_perform(download_req)
 
         if (resp_status(download_resp) == 200) {
