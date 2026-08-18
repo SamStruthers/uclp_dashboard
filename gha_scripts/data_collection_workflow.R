@@ -62,12 +62,15 @@ cached_data <- arrow::read_parquet(here("data", "data_backup.parquet"),
 message(paste("Collation Step:", "getting start dates"))
 # The cached data will have all of the data from all of the
 # sources, so this should not have to change.
+current_year <- year(Sys.Date())
+
 mm_DT <- cached_data %>%
   bind_rows() %>%
   filter(parameter != "ORP") %>%
   group_by(site, parameter) %>%
   summarize(max_dt = max(DT_round, na.rm = T),
             .groups = "drop") %>%
+  filter(year(max_dt) == current_year) %>% # make sure we're only looking at the current year's min
   filter(max_dt == min(max_dt, na.rm = T)) %>%
   slice(1) %>%
   pull(max_dt) %>%
@@ -221,19 +224,18 @@ all_data_with_context <- c(hv_data, wet_data, contrail_data, cached_context) %>%
                            parameter == "Temperature" & units == "C" ~ "°C",
                            TRUE ~ units),
          timestamp = DT) %>%
+  filter(parameter %in% c("Chl-a Fluorescence", "Depth",
+                          "DO" , "FDOM Fluorescence",
+                          "pH", "Specific Conductivity",
+                          "Temperature","Turbidity"))%>%
   split(f = list(.$site, .$parameter), sep = "-") %>%
   keep(~nrow(.) > 0)
 
-# remove stage data
-list_names <- names(all_data_with_context)
-keep_indices <- !grepl("stage", list_names, ignore.case = TRUE)
-all_data_with_context <- all_data_with_context[keep_indices]
 
 # Tidy all the raw files
 tidy_data <- all_data_with_context %>%
   map(~tidy_api_data(api_data = .)) %>%
-  keep(~!is.null(.)) %>%
-  keep_at(imap_lgl(., ~!grepl("ORP", .y)))
+  keep(~!is.null(.))
 
 # Read in threshold and sensor notes ----
 sensor_thresholds_file <- "data/qaqc/sensor_spec_thresholds.yml"
@@ -356,7 +358,7 @@ for (chunk_idx in seq_along(intrasensor_data_chunks)) {
 
 # Network Check and Final Flags
 site_order_list <- list(
-  clp = c("joei", "cbri", "chd", "pfal", "pbr_fc", "pman", "pbd",
+  clp = c("joei", "cbri", "chd", "pfal", "pbr_fc", "pman_fc", "pbd",
           "bellvue", "salyer", "udall", "riverbend", "cottonwood", "elc",
           "archery", "riverbluffs"),
   sfm = c("sfm")
