@@ -62,12 +62,15 @@ cached_data <- arrow::read_parquet(here("data", "data_backup.parquet"),
 message(paste("Collation Step:", "getting start dates"))
 # The cached data will have all of the data from all of the
 # sources, so this should not have to change.
+current_year <- year(Sys.Date())
+
 mm_DT <- cached_data %>%
   bind_rows() %>%
   filter(parameter != "ORP") %>%
   group_by(site, parameter) %>%
   summarize(max_dt = max(DT_round, na.rm = T),
             .groups = "drop") %>%
+  filter(year(max_dt) == current_year) %>% # make sure we're only looking at the current year's min
   filter(max_dt == min(max_dt, na.rm = T)) %>%
   slice(1) %>%
   pull(max_dt) %>%
@@ -101,6 +104,9 @@ if (mm_DT_tz == "UTC") {
   stop("unknown tz error.")
 }
 
+#Print out start and end times for logging
+message(paste("....Collation Step Update:", "Start DT (MDT):", denver_start_DT))
+message(paste("....Collation Step Update:", "End DT (MDT):", denver_end_DT))
 
 # Pull in data ----
 
@@ -110,6 +116,7 @@ if (mm_DT_tz == "UTC") {
 source(file = here("R", "pull_wet_api.R"))
 invalid_wet_values <- c(-9999, 638.30, -99.99)
 source(file = here("R", "pull_wet_api.R"))
+message(paste("Collation Step:", "getting WET livestream data"))
 
 wet_sites <- c("sfm", "chd", "pfal")
 
@@ -221,19 +228,35 @@ all_data_with_context <- c(hv_data, wet_data, contrail_data, cached_context) %>%
                            parameter == "Temperature" & units == "C" ~ "°C",
                            TRUE ~ units),
          timestamp = DT) %>%
+  filter(parameter %in% c("Chl-a Fluorescence", "Depth",
+                          "DO" , "FDOM Fluorescence",
+                          "pH", "Specific Conductivity",
+                          "Temperature","Turbidity"))%>%
   split(f = list(.$site, .$parameter), sep = "-") %>%
   keep(~nrow(.) > 0)
 
-# remove stage data
-list_names <- names(all_data_with_context)
-keep_indices <- !grepl("stage", list_names, ignore.case = TRUE)
-all_data_with_context <- all_data_with_context[keep_indices]
 
 # Tidy all the raw files
 tidy_data <- all_data_with_context %>%
   map(~tidy_api_data(api_data = .)) %>%
-  keep(~!is.null(.)) %>%
-  keep_at(imap_lgl(., ~!grepl("ORP", .y)))
+  keep(~!is.null(.))
+
+tidy_data_check <- tidy_data %>%
+  bind_rows() %>%
+  #get the min and max DT for each site
+  group_by(site) %>%
+  summarise(min_DT_utc = min(DT_round, na.rm = T),
+            max_DT_utc = max(DT_round, na.rm = T),
+            .groups = "drop")
+
+#Walk through each site and print out the min and max DT for logging purposes
+pwalk(tidy_data_check, function(site, min_DT_utc, max_DT_utc) {
+  message(paste("....Collation Step Update:",
+                "Site:", site,
+                "Min DT (UTC):", min_DT_utc,
+                "Max DT (UTC):", max_DT_utc))
+})
+
 
 # Read in threshold and sensor notes ----
 sensor_thresholds_file <- "data/qaqc/sensor_spec_thresholds.yml"
@@ -356,11 +379,13 @@ for (chunk_idx in seq_along(intrasensor_data_chunks)) {
 
 # Network Check and Final Flags
 site_order_list <- list(
-  clp = c("joei", "cbri", "chd", "pfal", "pbr_fc", "pman", "pbd",
+  clp = c("joei", "cbri", "chd", "pfal", "pbr_fc", "pman_fc", "pbd",
           "bellvue", "salyer", "udall", "riverbend", "cottonwood", "elc",
           "archery", "riverbluffs"),
   sfm = c("sfm")
 )
+message("\n=== Starting Network Check ====")
+
 
 network_flags <- intrasensor_flags_list %>%
   purrr::map(~ross.wq.tools::network_check(df = .,
@@ -389,12 +414,17 @@ v_final_flags <- network_flags %>%
   split(f = list(.$site, .$parameter), sep = "-") %>%
   keep(~nrow(.) > 0) %>%
   bind_rows()
+message("\n=== Joining with Cached Data ====")
 
 # Remove overlapping time periods from cached data, then add all new data ----
 final_data <- cached_data %>%
   anti_join(v_final_flags, by = c("site", "parameter", "DT_round")) %>%
   bind_rows(v_final_flags) %>%
   arrange(site, parameter, DT_round)
+
+message("\n=== Saving new file ====")
+message("\n New File has ", nrow(final_data), "rows. Cached data had ", nrow(cached_data), "rows.")
+
 
 # Write to new file ----
 arrow::write_parquet(final_data, here("data", "data_backup.parquet"))

@@ -227,7 +227,8 @@ pull_contrail_api <- function(start_DT, end_DT = Sys.time(), username, password,
         download_req <- request(encoded_url) |>
           req_cookie_preserve(session_file) |>
           req_timeout(15) |>
-          req_retry(max_tries = 2, backoff = ~ 5)
+          req_retry(max_tries = 2, backoff = ~ 2)
+
         download_resp <- req_perform(download_req)
 
         if (resp_status(download_resp) == 200) {
