@@ -39,7 +39,6 @@ suppressMessages({
   library(devtools) # this might be needed as ross.wq and cddsr are not on cran
   # Shiny
   library(shiny)
-  library(shinymanager) # maybe?
   library(shinycssloaders)
   # library(shinyTime)
   library(bslib)
@@ -115,12 +114,10 @@ plot_param_table <- tibble(
                  "Specific Conductivity", "Chl-a Fluorescence", "FDOM Fluorescence", "Depth",
                 "TOC"),
   lower = c(10, 0.1, 6.5, 6, 20, 0.1, 0.1, 0.1, 2),
-  upper = c(20, 40, 9, 10, 60, 1, 1, 2, 5),
+  upper = c(30, 40, 9, 10, 60, 1, 1, 2, 5),
   units = c("°C", "NTU", "", "mg/L", "µS/cm", "RFU", "RFU", "ft", "mg/L")
 )
-toc_model_bounds <- water_chem%>%
-  summarise(TOC_lower  = min(TOC, na.rm = T),
-            TOC_upper = max(TOC, na.rm = T))
+toc_model_bounds <-  tibble(TOC_lower  = 0.916, TOC_upper = 7.9)
 
 toc_forecast_sites <- read_csv("data/toc_forecast_location_metadata.csv", show_col_types = F)%>%filter(model_version == "Distributed")
 
