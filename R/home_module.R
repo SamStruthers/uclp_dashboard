@@ -84,7 +84,8 @@ home_server <- function(id, loaded_data, auth) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
-    # 0. Load Snapshot immediately for the map
+    # 0. Load full cached dataset ONCE, derive the map snapshot from it
+    full_cached_data <- reactiveVal(NULL)
     snapshot_data <- reactiveVal(NULL)
     distributed_toc_data <- reactiveVal(NULL)
     intake_forecast_data <- reactiveVal(NULL)
@@ -94,6 +95,8 @@ home_server <- function(id, loaded_data, auth) {
 
       tryCatch({
         df <- arrow::read_parquet(snapshot_url, as_data_frame = TRUE)
+        full_cached_data(df)
+
         latest_snapshot <- df %>%
           group_by(site, parameter) %>%
           filter(DT_round == max(DT_round, na.rm = TRUE)) %>%
@@ -382,7 +385,7 @@ home_server <- function(id, loaded_data, auth) {
       intake_cached_data <- intake_forecast_data() %>%
         filter(date == max(date, na.rm = TRUE)) %>% # Get the most recent forecast date
         mutate(across(contains("intake_q_swe_pred"), ~ round(.x, 2))) %>%
-        filter(date_24h <= Sys.Date() + days(10)) #Limit to the next 10 days
+        filter(date_24h <= max(date, na.rm = TRUE) + days(7)) #Limit to the next 7 days
 
       plot_toc_forecast(intake_cached_data)
     })
@@ -393,9 +396,8 @@ home_server <- function(id, loaded_data, auth) {
       full_sync_done = reactive({ sync_status$all_done }),
       snapshot_ready = reactive({ !is.null(snapshot_data()) }),
       cached_df = reactive({
-        # Return the full dataset that was loaded for the snapshot
-        # This will be available to the main server to avoid re-downloading
-        arrow::read_parquet(snapshot_url, as_data_frame = TRUE)
+        req(full_cached_data())
+        full_cached_data()
       })
     ))
   })
