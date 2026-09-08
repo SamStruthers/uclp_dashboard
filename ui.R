@@ -181,7 +181,7 @@ ui <-  #secure_app( #wrap in secure_app for authentication with shiny_manager. U
 
                     # Add descriptive text below the title
                     tags$p(
-                      "Model Ensemble line represents the mean of four separate models while the range represents the maximum and minimum estimates across models. Data gaps represent data removed due to QAQC process or due to data transmission errors.  Historical grab sampling values for comparison are available from 4/1/25-6/1/26, please change the date range above to view.",
+                      "Model Ensemble line represents the mean of four separate models while the range represents the maximum and minimum estimates across models. Data gaps represent data removed due to QAQC process or due to data transmission errors.  Historical grab sampling values for comparison are available from 1/1/26-6/1/26, please change the date range above to view.",
                       style = "margin-bottom: 16px; font-weight: bold; font-style; normal;"
                     ),
 
