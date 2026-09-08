@@ -91,7 +91,6 @@ home_server <- function(id, loaded_data, auth) {
 
     # Load initial snapshot (fastest path to map)
     observe({
-    req(is.character(auth$user) )
 
       tryCatch({
         df <- arrow::read_parquet(snapshot_url, as_data_frame = TRUE)
@@ -158,7 +157,7 @@ home_server <- function(id, loaded_data, auth) {
         # but apply_toc_model has a fallback to pull it if NULL.
         res <- apply_toc_model(
           sensor_data = sensor_snapshot,
-          scaling_params_file_path = "data/models/scaling_params_toc_20260518.parquet",
+          scaling_params_file_path = "data/models/scaling_params_toc_20260715.parquet",
           summarize_interval = "15 mins", # Match the choices in the ui
           time_col = "DT_round",
           value_col = "mean"
@@ -241,8 +240,16 @@ home_server <- function(id, loaded_data, auth) {
 
       # Add Modeled TOC estimates if available
       rt_toc <- realtime_toc_snapshot()
+
       if (!is.null(rt_toc) && nrow(rt_toc) > 0) {
-        latest_readings <- bind_rows(latest_readings, rt_toc)
+      #check if rt_toc is > 24 hours old
+      rt_toc <- rt_toc %>%
+        filter(DT_round_MT >= (Sys.time() - hours(24)))
+
+        latest_readings <- bind_rows(latest_readings, rt_toc)%>%
+        #convert Depth to ft if it is in M
+        mutate(mean = ifelse(parameter == "Depth" & units == "m", mean * 3.28084, mean),
+               units = ifelse(parameter == "Depth" & units == "m", "ft", units))
       }
 
       snapshot_timestamp <- max(latest_readings$DT_round_MT, na.rm = TRUE)

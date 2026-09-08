@@ -107,7 +107,7 @@ cdwr_api_key <- tryCatch({
   NULL
 })
 
-water_chem <- read_parquet("data/chem/ROSS_FC_water_chemistry_20251114.parquet")
+water_chem <- read_parquet("data/chem/ROSS_FC_water_chemistry_2026714.parquet")
 
 #Parameter plot bounds
 plot_param_table <- tibble(
@@ -125,7 +125,17 @@ toc_model_bounds <- water_chem%>%
 toc_forecast_sites <- read_csv("data/toc_forecast_location_metadata.csv", show_col_types = F)%>%filter(model_version == "Distributed")
 
 # Load TOC real-time model ensemble
-toc_realtime_model <- map(1:3, ~xgb.load(
-  modelfile = paste0("data/models/ross_only_toc_xgboost_model_fold", .x, "_20260518.ubj")
+toc_realtime_model <- map(1:4, ~xgb.load(
+  modelfile = paste0("data/models/ross_only_toc_xgboost_model_fold", .x, "_20260715.ubj")
 ))
+
+model_files <- list.files("data/models/", pattern = ".ubj", full.names = TRUE)
+#load each file and label with fold number and date from string
+all_realtime_toc_models <- map(1:length(model_files), function(i){
+  fold_num <- gsub("fold", "", str_extract(model_files[i], "fold\\d+"))
+  model_date_str <- str_extract(model_files[i], "\\d{8}")
+  model <- xgb.load(modelfile = model_files[i])
+  list(fold = fold_num, date = model_date_str, model = model)
+})
+
 
