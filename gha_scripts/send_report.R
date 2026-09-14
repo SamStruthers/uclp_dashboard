@@ -35,7 +35,7 @@ if ({
 }
 
 # --- 0. Secrets / config (pulled from GitHub Actions env vars) ---
-required_secrets <- c("CDWR_API_KEY", "RESEND_API_KEY", "EMAIL_FROM", "EMAIL_TO")
+required_secrets <- c("CDWR_API_KEY", "RESEND_API_KEY", "EMAIL_FROM", "EMAIL_TO", "DASHBOARD_LINK")
 missing <- required_secrets[Sys.getenv(required_secrets) == ""]
 if (length(missing) > 0) {
   stop("Missing required secrets: ", paste(missing, collapse = ", "))
@@ -45,6 +45,7 @@ cdwr_api_key <- Sys.getenv("CDWR_API_KEY")
 resend_api_key <- Sys.getenv("RESEND_API_KEY")
 email_from <- Sys.getenv("EMAIL_FROM")
 email_to <- Sys.getenv("EMAIL_TO")
+dashboard_link <- Sys.getenv("DASHBOARD_LINK")
 
 message("=== Starting weekly report generation ===")
 
@@ -377,14 +378,17 @@ html_body <- sprintf('
       <h2 style="font-size:20px; margin-top:24px; margin-bottom:8px; color:#333;">Summary of TOC Forecast</h2>
       <p>%s</p>
       <p style="font-size:14px; color:#333; margin-top:24px; line-height:1.5;">
-  If you have any questions, please contact the ROSS team (Sam Struthers: <a href="mailto:samuel.struthers@colostate.edu">samuel.struthers@colostate.edu</a> or Daniel Duncan: <a href="mailto:d.duncan@colostate.edu">d.duncan@colostate.edu</a>).<br>
-  This data is also available on the ROSS PDSS Dashboard, please contact for a link.<br>
-  Best regards,<br>
-  The ROSSyndicate Team
-</p>
-<p style="color:#888;font-size:12px; margin-top:32px;">Generated automatically via GitHub Actions.</p>
+        If you have any questions, please contact the ROSS team (Sam Struthers: <a href="mailto:samuel.struthers@colostate.edu">samuel.struthers@colostate.edu</a> or Daniel Duncan: <a href="mailto:d.duncan@colostate.edu">d.duncan@colostate.edu</a>).<br>
+        This data is also available on the <a href="%s">ROSS PDSS Dashboard</a>.
+      </p>
+      <p style="font-size:14px; color:#333; margin-top:24px; line-height:1.5;">
+        Best Regards,<br>
+        ROSSyndicate PDSS Team
+      </p>
+      <p style="color:#888;font-size:12px; margin-top:32px;">Generated automatically via GitHub Actions.</p>
     </body>
-  </html>', flow_img_tag, sensor_img_tag, forecast_img_tag)
+  </html>', flow_img_tag, sensor_img_tag, forecast_img_tag, dashboard_link)
+
 
 
 # --- Send via Resend API ---
