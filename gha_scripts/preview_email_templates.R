@@ -34,7 +34,9 @@ for (tpl in c("classic", "banner", "minimal")) {
     template = tpl,
     flow_src = img, sensor_src = img, forecast_src = img, flow_forecast_src = img,
     dashboard_link = "https://example.com/dashboard",
-    report_start = Sys.Date() - 7, report_end = Sys.Date()
+    report_start = Sys.Date() - 7, report_end = Sys.Date(),
+    staff_email = "staff@example.com"
+
   )
   write_email_preview(html, file = file.path("email_preview", paste0(tpl, ".html")))
 }

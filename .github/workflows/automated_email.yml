@@ -15,6 +15,7 @@ jobs:
       EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
       DASHBOARD_LINK: ${{ secrets.DASHBOARD_LINK }}
+      STAFF_EMAIL: ${{ secrets.STAFF_EMAIL }}
     steps:
       - uses: actions/checkout@v4
 
