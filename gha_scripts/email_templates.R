@@ -52,15 +52,13 @@ ross_email_pal <- list(
   )
 }
 
-.tpl_contact <- function(dashboard_link, link_color, text_color = .ink) {
+.tpl_contact <- function(dashboard_link, link_color, staff_email, text_color = .ink) {
   glue::glue('
 <p style="margin:0 0 12px 0;{.font}font-size:14px;line-height:22px;color:{text_color};">
-  If you have any questions, please contact the ROSS team:
-  Sam Struthers (<a href="mailto:samuel.struthers@colostate.edu" style="color:{link_color};">samuel.struthers@colostate.edu</a>)
-  or Daniel Duncan (<a href="mailto:d.duncan@colostate.edu" style="color:{link_color};">d.duncan@colostate.edu</a>).
+  For further investigation, this data is available on the <a href="{dashboard_link}" style="color:{link_color};font-weight:bold;">ROSS PDSS Dashboard</a>.
 </p>
-<p style="margin:0 0 12px 0;{.font}font-size:14px;line-height:22px;color:{text_color};">
-  This data is also available on the <a href="{dashboard_link}" style="color:{link_color};font-weight:bold;">ROSS PDSS Dashboard</a>.
+<p style="margin:0;{.font}font-size:14px;line-height:22px;color:{text_color};">
+  For questions or issues, please contact the ROSS Project Lead at <a href="mailto:{staff_email}" style="color:{link_color};"> {staff_email}</a>.
 </p>
 <p style="margin:0;{.font}font-size:14px;line-height:22px;color:{text_color};">
   Best Regards,<br><strong>CSU ROSSyndicate PDSS Team</strong>
@@ -85,7 +83,7 @@ ross_email_pal <- list(
 # TEMPLATE 1: "classic" - white card on light gray, navy header, accent bars
 # ============================================================================
 email_template_classic <- function(flow_src, sensor_src, forecast_src, flow_forecast_src,
-                                   dashboard_link, report_start, report_end) {
+                                   dashboard_link, report_start, report_end, staff_email) {
   p <- ross_email_pal
   dates <- .tpl_date_range(report_start, report_end)
   secs <- .tpl_sections(flow_src, sensor_src, forecast_src, flow_forecast_src)
@@ -120,9 +118,9 @@ email_template_classic <- function(flow_src, sensor_src, forecast_src, flow_fore
   {sections_html}
 
   <tr><td style="padding:34px 32px 0 32px;"><div style="border-top:1px solid #e5e7eb;font-size:0;line-height:0;">&nbsp;</div></td></tr>
-  <tr><td style="padding:22px 32px 8px 32px;">{.tpl_contact(dashboard_link, p$blue)}</td></tr>
+  <tr><td style="padding:22px 32px 8px 32px;">{.tpl_contact(dashboard_link, p$blue, staff_email)}</td></tr>
   <tr><td style="padding:16px 32px 28px 32px;">
-    <p style="margin:0;{.font}font-size:12px;color:#9ca3af;"> Data is preliminary and subject to change.</p>
+    <p style="margin:0;{.font}font-size:12px;color:#9ca3af;">Data is preliminary and subject to change.</p>
   </td></tr>
 
 </table>
@@ -134,7 +132,7 @@ email_template_classic <- function(flow_src, sensor_src, forecast_src, flow_fore
 # TEMPLATE 2: "banner" - bold gradient hero, numbered cards, plum footer
 # ============================================================================
 email_template_banner <- function(flow_src, sensor_src, forecast_src, flow_forecast_src,
-                                  dashboard_link, report_start, report_end) {
+                                  dashboard_link, report_start, report_end, staff_email) {
   p <- ross_email_pal
   dates <- .tpl_date_range(report_start, report_end)
 
@@ -176,8 +174,8 @@ email_template_banner <- function(flow_src, sensor_src, forecast_src, flow_forec
   <tr><td style="padding:24px 0 0 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
       <tr><td bgcolor="{p$plum}" style="background-color:{p$plum};padding:28px 32px 24px 32px;">
-        {.tpl_contact(dashboard_link, "#ffffff", "#f3e6f1")}
-        <p style="margin:20px 0 0 0;{.font}font-size:12px;color:#d6b4d1;">Generated automatically via GitHub Actions.</p>
+        {.tpl_contact(dashboard_link, "#ffffff", staff_email)}
+        <p style="margin:20px 0 0 0;{.font}font-size:12px;color:#d6b4d1;">Data is preliminary and subject to change.</p>
       </td></tr>
     </table>
   </td></tr>
@@ -191,7 +189,7 @@ email_template_banner <- function(flow_src, sensor_src, forecast_src, flow_forec
 # TEMPLATE 3: "minimal" - white, six-color brand strip, editorial layout
 # ============================================================================
 email_template_minimal <- function(flow_src, sensor_src, forecast_src, flow_forecast_src,
-                                   dashboard_link, report_start, report_end) {
+                                   dashboard_link, report_start, report_end, staff_email) {
   p <- ross_email_pal
   dates <- .tpl_date_range(report_start, report_end)
   secs <- .tpl_sections(flow_src, sensor_src, forecast_src, flow_forecast_src)
@@ -230,9 +228,9 @@ email_template_minimal <- function(flow_src, sensor_src, forecast_src, flow_fore
   <tr><td style="padding:40px 0 0 0;">
     <div style="border-top:2px solid {p$navy};font-size:0;line-height:0;">&nbsp;</div>
   </td></tr>
-  <tr><td style="padding:20px 0 0 0;">{.tpl_contact(dashboard_link, p$navy)}</td></tr>
+  <tr><td style="padding:20px 0 0 0;">{.tpl_contact(dashboard_link, p$navy, staff_email)}</td></tr>
   <tr><td style="padding:20px 0 0 0;">
-    <p style="margin:0;{.font}font-size:12px;color:#9ca3af;">Generated automatically via GitHub Actions.</p>
+    <p style="margin:0;{.font}font-size:12px;color:#9ca3af;">Data is preliminary and subject to change.</p>
   </td></tr>
 </table>
 
@@ -244,9 +242,9 @@ email_template_minimal <- function(flow_src, sensor_src, forecast_src, flow_fore
 build_email_html <- function(template = c("classic", "banner", "minimal"), ...) {
   template <- match.arg(template)
   as.character(switch(template,
-    classic = email_template_classic(...),
-    banner  = email_template_banner(...),
-    minimal = email_template_minimal(...)
+                      classic = email_template_classic(...),
+                      banner  = email_template_banner(...),
+                      minimal = email_template_minimal(...)
   ))
 }
 
