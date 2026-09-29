@@ -44,7 +44,7 @@ email_template <- "classic"
 
 required_secrets <- "CDWR_API_KEY"
 if (!preview_only) {
-  required_secrets <- c(required_secrets, "RESEND_API_KEY", "EMAIL_FROM", "EMAIL_TO", "DASHBOARD_LINK")
+  required_secrets <- c(required_secrets, "RESEND_API_KEY", "EMAIL_FROM", "EMAIL_TO", "DASHBOARD_LINK", "STAFF_EMAIL")
 }
 missing <- required_secrets[Sys.getenv(required_secrets) == ""]
 if (length(missing) > 0) {
@@ -56,6 +56,7 @@ resend_api_key <- Sys.getenv("RESEND_API_KEY")
 email_from <- Sys.getenv("EMAIL_FROM")
 email_to <- Sys.getenv("EMAIL_TO")
 dashboard_link <- Sys.getenv("DASHBOARD_LINK")
+staff_email <- Sys.getenv("STAFF_EMAIL")
 if (preview_only && dashboard_link == "") dashboard_link <- "#"
 
 message("=== Starting weekly report generation ===")
@@ -461,7 +462,8 @@ html_body <- build_email_html(
   forecast_src = img_src$forecast,
   dashboard_link = dashboard_link,
   report_start = today_mt - days(7),
-  report_end = today_mt
+  report_end = today_mt,
+  staff_email = staff_email
 )
 
 if (preview_only) {
